@@ -1,0 +1,350 @@
+@import "tailwindcss";
+
+/* =========================
+   THEME TOKENS (Neon Athlete)
+   ========================= */
+:root {
+  color-scheme: dark;
+
+  --bg: 8 8 10;            /* near-black */
+  --panel: 18 18 22;       /* panel base */
+  --text: 244 244 245;
+
+  --accent: 34 197 94;     /* vivid green */
+  --accent2: 56 189 248;   /* cyan */
+  --good: 34 197 94;
+  --bad: 239 68 68;
+  --warn: 245 158 11;
+
+  --ring: 255 255 255;
+}
+
+html, body { height: 100%; margin: 0; }
+
+body {
+  background: rgb(var(--bg));
+  color: rgb(var(--text));
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+}
+
+/* =========================
+   APP BACKGROUND (general)
+   ========================= */
+.elite-bg {
+  background:
+    radial-gradient(900px 550px at 18% 12%, rgba(var(--accent), 0.22), transparent 55%),
+    radial-gradient(900px 550px at 88% 18%, rgba(var(--accent2), 0.18), transparent 55%),
+    radial-gradient(900px 650px at 50% 92%, rgba(168, 85, 247, 0.10), transparent 58%),
+    linear-gradient(to bottom, rgb(var(--bg)), rgb(var(--bg)));
+}
+
+/* =========================
+   BUTTONS
+   ========================= */
+.btn-win {
+  background: linear-gradient(135deg, rgba(var(--accent), 0.95), rgba(var(--accent2), 0.80));
+  color: rgb(10 10 12);
+  font-weight: 900;
+  border: 1px solid rgba(var(--ring), 0.12);
+  box-shadow:
+    0 14px 45px rgba(var(--accent), 0.22),
+    0 0 0 1px rgba(255,255,255,0.06);
+}
+.btn-win:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.btn-win:active { transform: translateY(1px); }
+
+.btn-busy { opacity: 0.75; cursor: not-allowed; }
+
+/* =========================
+   LOGIN PAGE HERO
+   ========================= */
+.login-hero {
+  min-height: 100vh;
+  position: relative;
+  overflow: hidden;
+
+  /* Real photo + premium gradients */
+  background:
+    radial-gradient(900px 650px at 20% 20%, rgba(var(--accent), 0.16), transparent 60%),
+    radial-gradient(900px 650px at 80% 10%, rgba(var(--accent2), 0.12), transparent 55%),
+    linear-gradient(to bottom, rgba(0,0,0,0.20), rgba(0,0,0,0.82)),
+    url("/gym-bg.jpg");
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+/* Overlay to keep everything readable */
+.login-hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(1200px 900px at 50% 35%, rgba(255,255,255,0.06), transparent 60%),
+    linear-gradient(to bottom, rgba(0,0,0,0.35), rgba(0,0,0,0.86));
+  pointer-events: none;
+}
+
+/* =========================
+   MARQUEE (seamless loop)
+   ========================= */
+.marquee {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 52px;
+  border-bottom: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.38);
+  backdrop-filter: blur(10px);
+  z-index: 5;
+}
+
+.marquee__track {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 60px;
+  animation: marquee-left 18s linear infinite;
+  will-change: transform;
+}
+
+.marquee__row {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  white-space: nowrap;
+}
+
+.marquee__item {
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 12px;
+  color: rgba(255,255,255,0.95);
+  text-shadow: 0 0 18px rgba(255,255,255,0.10);
+}
+
+.marquee__dot {
+  margin-left: 18px;
+  color: rgba(var(--accent), 0.95);
+  text-shadow: 0 0 16px rgba(var(--accent), 0.25);
+}
+
+@keyframes marquee-left {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+/* =========================
+   LOGIN LAYOUT
+   ========================= */
+.login-wrap {
+  position: relative;
+  z-index: 10;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 72px 20px 28px; /* clear marquee */
+}
+
+.login-card {
+  width: min(560px, 92vw);
+  border-radius: 26px;
+  padding: 26px 26px 18px;
+  position: relative;
+}
+
+/* ✅ PART 5 — Premium Card */
+.premium-card {
+  background:
+    radial-gradient(900px 500px at 20% 0%, rgba(255,255,255,0.07), transparent 55%),
+    radial-gradient(900px 500px at 80% 20%, rgba(var(--accent2), 0.10), transparent 58%),
+    linear-gradient(180deg, rgba(24,24,28,0.78), rgba(12,12,14,0.66));
+  border: 1px solid rgba(255,255,255,0.14);
+  box-shadow:
+    0 30px 120px rgba(0,0,0,0.65),
+    0 0 0 1px rgba(255,255,255,0.05),
+    0 0 55px rgba(var(--accent), 0.12);
+  backdrop-filter: blur(16px);
+  overflow: hidden;
+}
+
+/* subtle moving shine */
+.login-card__shine {
+  position: absolute;
+  inset: -40%;
+  background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.10), transparent 55%);
+  filter: blur(20px);
+  transform: translateX(-20%);
+  animation: cardShine 6s ease-in-out infinite;
+  pointer-events: none;
+  opacity: 0.85;
+}
+@keyframes cardShine {
+  0%   { transform: translateX(-18%) translateY(-8%); opacity: 0.70; }
+  50%  { transform: translateX(10%) translateY(6%);  opacity: 0.95; }
+  100% { transform: translateX(-18%) translateY(-8%); opacity: 0.70; }
+}
+
+/* ultra-light film grain */
+.login-card__noise {
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.18'/%3E%3C/svg%3E");
+  opacity: 0.08;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+}
+
+.login-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  color: rgba(255,255,255,0.88);
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.06);
+  position: relative;
+  z-index: 2;
+}
+
+.login-title {
+  margin-top: 14px;
+  font-size: 46px;
+  font-weight: 950;
+  letter-spacing: 0.02em;
+  color: rgba(255,255,255,0.97);
+  position: relative;
+  z-index: 2;
+}
+
+.login-subtitle {
+  margin-top: 6px;
+  font-size: 15px;
+  color: rgba(255,255,255,0.72);
+  position: relative;
+  z-index: 2;
+}
+
+/* Quote / warning text */
+.login-quote {
+  margin-top: 14px;
+  font-size: 16px;
+  line-height: 1.45;
+  color: rgba(255,255,255,0.90);
+  position: relative;
+  z-index: 2;
+}
+
+.warning-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-style: italic;
+}
+.warning-icon { filter: drop-shadow(0 0 10px rgba(245,158,11,0.35)); }
+.warning-strong {
+  color: rgba(251,191,36,0.98);
+  font-weight: 800;
+  text-shadow: 0 0 14px rgba(245,158,11,0.35);
+}
+.warning-sub {
+  margin-top: 4px;
+  font-style: italic;
+  color: rgba(255,255,255,0.82);
+}
+.warning-accent {
+  color: rgba(255,255,255,0.95);
+  text-shadow: 0 0 18px rgba(255,255,255,0.12);
+}
+
+.login-form {
+  margin-top: 18px;
+  display: grid;
+  gap: 12px;
+  position: relative;
+  z-index: 2;
+}
+
+.login-input {
+  width: 100%;
+  border-radius: 14px;
+  padding: 14px 14px;
+  font-size: 15px;
+  color: rgba(255,255,255,0.94);
+  background: rgba(0,0,0,0.32);
+  border: 1px solid rgba(255,255,255,0.14);
+  outline: none;
+  transition: box-shadow 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+.login-input:focus {
+  border-color: rgba(var(--accent), 0.62);
+  box-shadow:
+    0 0 0 4px rgba(var(--accent), 0.14),
+    0 0 30px rgba(var(--accent2), 0.10);
+  transform: translateY(-1px);
+}
+
+.login-btn {
+  border-radius: 14px;
+  padding: 12px 14px;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.login-links {
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.link {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: rgba(255,255,255,0.70);
+  font-size: 14px;
+}
+.link-accent {
+  color: rgba(var(--accent), 0.98);
+  font-weight: 900;
+  text-shadow: 0 0 18px rgba(var(--accent), 0.18);
+}
+
+.login-msg {
+  margin-top: 6px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(0,0,0,0.25);
+  font-size: 14px;
+}
+.login-msg.ok { color: rgba(var(--good), 0.95); border-color: rgba(var(--good), 0.30); }
+.login-msg.bad { color: rgba(var(--bad), 0.95); border-color: rgba(var(--bad), 0.30); }
+
+.login-vision {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255,255,255,0.10);
+  position: relative;
+  z-index: 2;
+}
+
+.hype {
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: rgba(255,255,255,0.70);
+}
+
+.vision-text {
+  margin-top: 6px;
+  color: rgba(255,255,255,0.78);
+  font-size: 13px;
+  line-height: 1.4;
+}
