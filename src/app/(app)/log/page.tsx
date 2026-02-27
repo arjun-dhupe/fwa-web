@@ -7,14 +7,18 @@ import { useRouter } from "next/navigation";
 type MealType = "breakfast" | "lunch" | "dinner" | "snack";
 
 type RecentFood = {
-  id: string;
+  id?: string | null;
   name: string;
   calories_per_100g: number | null;
   protein_g_per_100g: number | null;
   last_used_at: string;
+
+  // NEW master defaults (food_items)
+  measure_mode?: "grams" | "unit" | null;
+  unit_label?: string | null;
+  grams_per_unit?: number | null;
+  default_units?: number | null;
   default_grams?: number | null;
-  default_unit_label?: string | null;
-  default_unit_grams?: number | null;
 };
 
 function isUuid(v: any) {
@@ -47,6 +51,7 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
 export default function LogPage() {
   const router = useRouter();
   const todayIso = useMemo(() => yyyyMmDd(new Date()), []);
+  const [logDateIso, setLogDateIso] = useState<string>(todayIso);
 
   const [userId, setUserId] = useState<string>("");
 
@@ -92,6 +97,50 @@ export default function LogPage() {
   const waterTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const foodTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Helper to load logs for a specific date
+  async function loadLogsForDate(uid: string, dateIso: string) {
+    if (!uid || !dateIso) return;
+
+    try {
+      const [stepsRes, sleepRes, waterRes, mealsRes] = await Promise.all([
+        supabase
+          .from("daily_logs")
+          .select("steps")
+          .eq("user_id", uid)
+          .eq("log_date", dateIso)
+          .maybeSingle(),
+        supabase
+          .from("sleep_logs")
+          .select("hours")
+          .eq("user_id", uid)
+          .eq("log_date", dateIso)
+          .maybeSingle(),
+        supabase
+          .from("water_logs")
+          .select("ml")
+          .eq("user_id", uid)
+          .eq("log_date", dateIso)
+          .maybeSingle(),
+        supabase
+          .from("meals")
+          .select("id,meal_type,title,food_name,grams,calories,protein_g,created_at")
+          .eq("user_id", uid)
+          .eq("log_date", dateIso)
+          .order("created_at", { ascending: false }),
+      ]);
+
+      setSteps(stepsRes.data?.steps != null ? Number(stepsRes.data.steps) : 0);
+      setSleepHours(sleepRes.data?.hours != null ? Number(sleepRes.data.hours) : 0);
+      setWaterMl(waterRes.data?.ml != null ? Number(waterRes.data.ml) : 0);
+      setMealsToday(Array.isArray(mealsRes.data) ? mealsRes.data : []);
+
+      // Keep recents per meal type (not date-specific)
+      await fetchRecentFoods(uid, mealType);
+    } catch {
+      // If anything fails, don't crash the page
+    }
+  }
+
   // ================= INIT =================
   useEffect(() => {
     (async () => {
@@ -101,44 +150,12 @@ export default function LogPage() {
         return;
       }
       setUserId(data.user.id);
-
+      setLogDateIso((prev) => prev || todayIso);
       try {
-        const [stepsRes, sleepRes, waterRes, mealsRes] = await Promise.all([
-          supabase
-            .from("daily_logs")
-            .select("steps")
-            .eq("user_id", data.user.id)
-            .eq("log_date", todayIso)
-            .maybeSingle(),
-          supabase
-            .from("sleep_logs")
-            .select("hours")
-            .eq("user_id", data.user.id)
-            .eq("log_date", todayIso)
-            .maybeSingle(),
-          supabase
-            .from("water_logs")
-            .select("ml")
-            .eq("user_id", data.user.id)
-            .eq("log_date", todayIso)
-            .maybeSingle(),
-          supabase
-            .from("meals")
-            .select("id,meal_type,title,food_name,grams,calories,protein_g,created_at")
-            .eq("user_id", data.user.id)
-            .eq("log_date", todayIso)
-            .order("created_at", { ascending: false }),
-        ]);
-
-        if (stepsRes.data?.steps != null) setSteps(Number(stepsRes.data.steps));
-        if (sleepRes.data?.hours != null) setSleepHours(Number(sleepRes.data.hours));
-        if (waterRes.data?.ml != null) setWaterMl(Number(waterRes.data.ml));
-        if (Array.isArray(mealsRes.data)) setMealsToday(mealsRes.data);
-
-        await fetchRecentFoods(data.user.id, mealType);
+        await loadLogsForDate(data.user.id, logDateIso);
       } catch {}
     })();
-  }, [router, todayIso]);
+  }, [router, todayIso, logDateIso]);
 
   // Refresh smart recents when user switches meal type
   useEffect(() => {
@@ -146,6 +163,13 @@ export default function LogPage() {
     fetchRecentFoods(userId, mealType);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mealType, userId]);
+
+  // Reload logs when the selected date changes
+  useEffect(() => {
+    if (!userId) return;
+    loadLogsForDate(userId, logDateIso);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [logDateIso, userId]);
 
   // ================= AUTOSAVE =================
   function scheduleAutosave(kind: "steps" | "sleep" | "water", value: number) {
@@ -158,17 +182,17 @@ export default function LogPage() {
         setMsg("");
         if (kind === "steps")
           await supabase.from("daily_logs").upsert(
-            { user_id: userId, log_date: todayIso, steps: value },
+            { user_id: userId, log_date: logDateIso, steps: value },
             { onConflict: "user_id,log_date" }
           );
         if (kind === "sleep")
           await supabase.from("sleep_logs").upsert(
-            { user_id: userId, log_date: todayIso, hours: value },
+            { user_id: userId, log_date: logDateIso, hours: value },
             { onConflict: "user_id,log_date" }
           );
         if (kind === "water")
           await supabase.from("water_logs").upsert(
-            { user_id: userId, log_date: todayIso, ml: value },
+            { user_id: userId, log_date: logDateIso, ml: value },
             { onConflict: "user_id,log_date" }
           );
         setMsg("✅ Autosaved.");
@@ -184,10 +208,94 @@ export default function LogPage() {
   async function fetchRecentFoods(uid: string, type: MealType) {
     if (!uid) return;
 
+    // Fallback: compute recents from meals table when the view fails/empty
+    async function fallbackFromMeals() {
+      const { data: meals, error: mErr } = await supabase
+        .from("meals")
+        .select("food_item_id,food_name,created_at")
+        .eq("user_id", uid)
+        .eq("meal_type", type)
+        .order("created_at", { ascending: false })
+        .limit(60);
+
+      if (mErr) throw mErr;
+
+      const seen = new Set<string>();
+      const picked: { food_item_id: string | null; food_name: string; created_at: string }[] = [];
+
+      for (const m of meals || []) {
+        const key = (m.food_item_id
+          ? `id:${m.food_item_id}`
+          : `name:${(m.food_name || "").toLowerCase().trim()}`).trim();
+
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+
+        picked.push({
+          food_item_id: m.food_item_id ?? null,
+          food_name: (m.food_name || "").trim() || "Unknown",
+          created_at: m.created_at,
+        });
+
+        if (picked.length >= 8) break;
+      }
+
+      const ids = picked
+        .map((p) => p.food_item_id)
+        .filter((x): x is string => typeof x === "string" && x.length > 0);
+
+      let foods: any[] = [];
+      if (ids.length > 0) {
+        const { data: foodsData, error: foodsErr } = await supabase
+          .from("food_items")
+          .select(
+            "id,name,calories_per_100g,protein_g_per_100g,measure_mode,unit_label,grams_per_unit,default_units,default_grams"
+          )
+          .in("id", ids);
+
+        if (foodsErr) throw foodsErr;
+        foods = foodsData || [];
+      }
+
+      const map = new Map<string, any>(foods.map((f: any) => [f.id, f]));
+
+      const merged: RecentFood[] = picked.map((p) => {
+        const f = p.food_item_id ? map.get(p.food_item_id) : null;
+
+        if (f) {
+          return {
+            id: f.id,
+            name: f.name,
+            calories_per_100g: f.calories_per_100g ?? null,
+            protein_g_per_100g: f.protein_g_per_100g ?? null,
+            last_used_at: p.created_at,
+            measure_mode: (f.measure_mode ?? null) as any,
+            unit_label: f.unit_label ?? null,
+            grams_per_unit: f.grams_per_unit != null ? Number(f.grams_per_unit) : null,
+            default_units: f.default_units != null ? Number(f.default_units) : null,
+            default_grams: f.default_grams != null ? Number(f.default_grams) : null,
+          };
+        }
+
+        // If meal was saved without a food_item_id, still show the name
+        return {
+          id: null,
+          name: p.food_name,
+          calories_per_100g: null,
+          protein_g_per_100g: null,
+          last_used_at: p.created_at,
+          measure_mode: "grams",
+          default_grams: 100,
+        };
+      });
+
+      setRecentFoods(merged);
+    }
+
     try {
       setRecentLoading(true);
 
-      // 1) Get last used food ids from the view
+      // 1) Try the view first
       const { data: rec, error: recErr } = await supabase
         .from("recent_foods")
         .select("food_item_id,last_used_at")
@@ -196,21 +304,26 @@ export default function LogPage() {
         .order("last_used_at", { ascending: false })
         .limit(8);
 
-      if (recErr) throw recErr;
+      if (recErr) {
+        await fallbackFromMeals();
+        return;
+      }
 
       const ids = (rec || [])
         .map((r: any) => r.food_item_id)
         .filter((x: any) => typeof x === "string" && x.length > 0);
 
       if (ids.length === 0) {
-        setRecentFoods([]);
+        await fallbackFromMeals();
         return;
       }
 
-      // 2) Pull those items from your master list table (INCLUDING DEFAULTS)
+      // 2) Pull those items from master list (NEW columns)
       const { data: foods, error: foodsErr } = await supabase
         .from("food_items")
-        .select("id,name,calories_per_100g,protein_g_per_100g,default_grams,default_unit_label,default_unit_grams")
+        .select(
+          "id,name,calories_per_100g,protein_g_per_100g,measure_mode,unit_label,grams_per_unit,default_units,default_grams"
+        )
         .in("id", ids);
 
       if (foodsErr) throw foodsErr;
@@ -227,9 +340,11 @@ export default function LogPage() {
             calories_per_100g: f.calories_per_100g ?? null,
             protein_g_per_100g: f.protein_g_per_100g ?? null,
             last_used_at: r.last_used_at,
-            default_grams: f.default_grams ?? null,
-            default_unit_label: f.default_unit_label ?? null,
-            default_unit_grams: f.default_unit_grams ?? null,
+            measure_mode: (f.measure_mode ?? null) as any,
+            unit_label: f.unit_label ?? null,
+            grams_per_unit: f.grams_per_unit != null ? Number(f.grams_per_unit) : null,
+            default_units: f.default_units != null ? Number(f.default_units) : null,
+            default_grams: f.default_grams != null ? Number(f.default_grams) : null,
           } as RecentFood;
         })
         .filter(Boolean) as RecentFood[];
@@ -278,24 +393,24 @@ export default function LogPage() {
   }, [foodOpen]);
 
   async function runFoodSearch(q: string) {
-  try {
-    setFoodLoading(true);
+    try {
+      setFoodLoading(true);
 
-    const { data, error } = await supabase
-      .from("food_items")
-      .select("*")
-      .ilike("name", `%${q}%`)
-      .limit(20);
+      const { data, error } = await supabase
+        .from("food_items")
+        .select("*")
+        .ilike("name", `%${q}%`)
+        .limit(20);
 
-    if (error) throw error;
+      if (error) throw error;
 
-    setFoodItems(data || []);
-  } catch {
-    setFoodItems([]);
-  } finally {
-    setFoodLoading(false);
+      setFoodItems(data || []);
+    } catch {
+      setFoodItems([]);
+    } finally {
+      setFoodLoading(false);
+    }
   }
-}
 
   function recalcMeal(selected: any, grams: number) {
     if (!selected) return;
@@ -313,31 +428,36 @@ export default function LogPage() {
   function applyFoodDefaults(it: any) {
     if (!it) return;
 
-    const dUnitLabel = (it?.default_unit_label ?? null) as string | null;
-    const dUnitGrams = it?.default_unit_grams != null ? Number(it.default_unit_grams) : null;
+    const mode = (it?.measure_mode ?? "grams") as "grams" | "unit";
+    const gPerUnit = it?.grams_per_unit != null ? Number(it.grams_per_unit) : 0;
+    const uLabel = (it?.unit_label ?? null) as string | null;
+    const dUnits = it?.default_units != null ? Number(it.default_units) : null;
     const dGrams = it?.default_grams != null ? Number(it.default_grams) : null;
 
-    // Prefer unit mode if defaults exist (chapati, egg, banana, etc.)
-    if (dUnitLabel && dUnitGrams && dUnitGrams > 0) {
+    // Prefer unit mode if the item is configured as unit-based
+    if (mode === "unit" && gPerUnit > 0) {
       setQtyMode("unit");
-      setUnitLabel(dUnitLabel);
-      setUnitGrams(dUnitGrams);
-      setUnitCount(1);
+      setUnitLabel(uLabel && uLabel.trim().length > 0 ? uLabel : "unit");
+      setUnitGrams(gPerUnit);
 
-      setFoodGrams(dUnitGrams);
-      recalcMeal(it, dUnitGrams);
+      const count = dUnits && dUnits > 0 ? dUnits : 1;
+      setUnitCount(count);
+
+      const grams = Math.round(gPerUnit * count);
+      setFoodGrams(grams);
+      recalcMeal(it, grams);
       return;
     }
 
-    // else grams mode
-    const g = dGrams && dGrams > 0 ? dGrams : 100;
+    // grams mode
+    const grams = dGrams && dGrams > 0 ? dGrams : 100;
     setQtyMode("grams");
     setUnitLabel("serving");
     setUnitGrams(0);
     setUnitCount(1);
 
-    setFoodGrams(g);
-    recalcMeal(it, g);
+    setFoodGrams(grams);
+    recalcMeal(it, grams);
   }
 
   function setUnitCountSafe(next: number, it: any) {
@@ -380,9 +500,9 @@ export default function LogPage() {
     try {
       const title = (foodSelected?.name || "Meal").trim() || "Meal";
 
-      const { error } = await supabase.from("meals").insert({
+      const insertPayload: any = {
         user_id: userId,
-        log_date: todayIso,
+        log_date: logDateIso,
         meal_type: mealType,
         food_item_id: isUuid(foodSelected?.id) ? foodSelected.id : null,
         title,
@@ -390,7 +510,28 @@ export default function LogPage() {
         grams: Number(foodGrams) || 0,
         calories: Math.round(Number(mealCalories) || 0),
         protein_g: Math.round(Number(mealProtein) || 0),
-      });
+      };
+
+      // Save quantity + unit + grams IF the meals table has these columns.
+      // If not present, we retry without them (so app still works).
+      if (qtyMode === "unit") {
+        insertPayload.quantity = Number(unitCount) || 0;
+        insertPayload.unit_label = unitLabel;
+        insertPayload.measure_mode = "unit";
+      } else {
+        insertPayload.quantity = Number(foodGrams) || 0;
+        insertPayload.unit_label = "g";
+        insertPayload.measure_mode = "grams";
+      }
+
+      let { error } = await supabase.from("meals").insert(insertPayload);
+
+      // If meals table doesn't have these new columns, retry safely
+      if (error && typeof error.message === "string" && error.message.toLowerCase().includes("column")) {
+        const { quantity, unit_label, measure_mode, ...fallback } = insertPayload;
+        const retry = await supabase.from("meals").insert(fallback);
+        error = retry.error;
+      }
 
       if (error) throw error;
 
@@ -398,7 +539,7 @@ export default function LogPage() {
         .from("meals")
         .select("id,meal_type,title,food_name,grams,calories,protein_g,created_at")
         .eq("user_id", userId)
-        .eq("log_date", todayIso)
+        .eq("log_date", logDateIso)
         .order("created_at", { ascending: false });
 
       setMealsToday(data || []);
@@ -428,6 +569,7 @@ export default function LogPage() {
       if (error) throw error;
 
       setMealsToday((prev) => prev.filter((m) => m.id !== mealId));
+      loadLogsForDate(userId, logDateIso);
       setMsg("✅ Meal deleted.");
     } catch (e: any) {
       setMsg(e?.message ?? "Failed to delete meal");
@@ -439,8 +581,27 @@ export default function LogPage() {
   return (
     <div className="space-y-4">
       <div className="glass glow-ring rounded-2xl p-4">
-        <h1 className="text-3xl font-extrabold text-white">Log Today’s Data</h1>
-        <p className="text-sm text-white/70">{todayIso}</p>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="text-3xl font-extrabold text-white">Log Data</h1>
+            <p className="text-sm text-white/70">Selected date: {logDateIso}</p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-white/60">Log date</div>
+            <input
+              type="date"
+              value={logDateIso}
+              onChange={(e) => {
+                const next = e.target.value;
+                setLogDateIso(next);
+                setMsg("");
+                resetMealEntry(false);
+              }}
+              className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white"
+            />
+          </div>
+        </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -514,19 +675,21 @@ export default function LogPage() {
                 <div className="text-xs text-white/55">Loading recent foods…</div>
               ) : recentFoods.length > 0 ? (
                 <div className="flex flex-wrap gap-2">
-                  {recentFoods.slice(0, 6).map((f) => (
+                  {recentFoods.slice(0, 6).map((f, idx) => (
                     <button
-                      key={f.id}
+                      key={f.id ?? `${f.name}-${idx}`}
                       type="button"
                       onClick={() => {
                         const it = {
-                          id: f.id,
+                          id: f.id ?? null,
                           name: f.name,
                           calories_per_100g: f.calories_per_100g,
                           protein_g_per_100g: f.protein_g_per_100g,
+                          measure_mode: f.measure_mode ?? "grams",
+                          unit_label: f.unit_label ?? null,
+                          grams_per_unit: f.grams_per_unit ?? null,
+                          default_units: f.default_units ?? null,
                           default_grams: f.default_grams ?? null,
-                          default_unit_label: f.default_unit_label ?? null,
-                          default_unit_grams: f.default_unit_grams ?? null,
                           source: "master",
                         };
                         setFoodSelected(it);
@@ -595,9 +758,10 @@ export default function LogPage() {
                               <div className="shrink-0 text-right text-xs text-white/65">
                                 <div>{cal100} kcal/100g</div>
                                 <div>{pro100}g protein/100g</div>
-                                {it.default_unit_label && it.default_unit_grams ? (
+
+                                {it.measure_mode === "unit" && it.unit_label && it.grams_per_unit ? (
                                   <div className="mt-1 text-[11px] text-white/55">
-                                    Default: 1 {it.default_unit_label} ({it.default_unit_grams}g)
+                                    Default: {it.default_units ?? 1} {it.unit_label} ({it.grams_per_unit}g each)
                                   </div>
                                 ) : it.default_grams ? (
                                   <div className="mt-1 text-[11px] text-white/55">Default: {it.default_grams}g</div>
@@ -688,22 +852,28 @@ export default function LogPage() {
                         className="w-24 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white"
                       />
 
-                      {foodSelected?.default_unit_label && foodSelected?.default_unit_grams ? (
+                      {foodSelected?.measure_mode === "unit" &&
+                      foodSelected?.unit_label &&
+                      foodSelected?.grams_per_unit ? (
                         <button
                           type="button"
                           onClick={() => {
                             setQtyMode("unit");
-                            setUnitLabel(String(foodSelected.default_unit_label));
-                            setUnitGrams(Number(foodSelected.default_unit_grams));
-                            setUnitCount(1);
+                            setUnitLabel(String(foodSelected.unit_label));
+                            setUnitGrams(Number(foodSelected.grams_per_unit));
 
-                            const g = Number(foodSelected.default_unit_grams);
+                            const count =                               foodSelected.default_units && Number(foodSelected.default_units) > 0
+                                ? Number(foodSelected.default_units)
+                                : 1;
+                            setUnitCount(count);
+
+                            const g = Math.round(Number(foodSelected.grams_per_unit) * count);
                             setFoodGrams(g);
                             recalcMeal(foodSelected, g);
                           }}
                           className="rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-white/80 hover:bg-white/10"
                         >
-                          Use {String(foodSelected.default_unit_label)}
+                          Use {String(foodSelected.unit_label)}
                         </button>
                       ) : null}
                     </div>
@@ -722,7 +892,9 @@ export default function LogPage() {
                 </div>
               </div>
 
-              <div className="mt-2 text-xs text-white/55">Tip: pick food → adjust quantity → hit “Add”.</div>
+              <div className="mt-2 text-xs text-white/55">
+                Tip: pick food → adjust quantity → hit “Add”.
+              </div>
             </div>
 
             {/* Add button */}
@@ -745,7 +917,7 @@ export default function LogPage() {
             <div className="mt-4 space-y-2">
               {mealsToday.length > 0 ? (
                 <>
-                  <div className="text-xs font-semibold text-white/70">Added today</div>
+                  <div className="text-xs font-semibold text-white/70">Added for selected date</div>
 
                   {mealsToday.map((m) => (
                     <div
@@ -794,7 +966,12 @@ export default function LogPage() {
         </Card>
       </div>
 
-      {msg && <div className={cx("text-sm", msg.startsWith("✅") ? "text-emerald-300" : "text-red-300")}>{msg}</div>}
+      {msg && (
+        <div className={cx("text-sm", msg.startsWith("✅") ? "text-emerald-300" : "text-red-300")}>
+          {msg}
+        </div>
+      )}
     </div>
   );
 }
+                             
