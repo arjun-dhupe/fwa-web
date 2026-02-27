@@ -1,10 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useRouter } from "next/navigation";
-import { getDailyQuote } from "@/lib/motivation";
-import { computeStreak, levelFromXp } from "@/lib/gamification";
 
 function yyyyMmDd(d: Date) {
   const yyyy = d.getFullYear();
@@ -13,848 +11,562 @@ function yyyyMmDd(d: Date) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function weekStartMondayISO(isoDate: string) {
-  const d = new Date(isoDate + "T00:00:00");
-  const day = (d.getDay() + 6) % 7;
-  d.setDate(d.getDate() - day);
-  return yyyyMmDd(d);
+function cx(...s: (string | false | null | undefined)[]) {
+  return s.filter(Boolean).join(" ");
 }
 
-function dayIndexInWeek(isoDate: string) {
-  const d = new Date(isoDate + "T00:00:00");
-  const day = (d.getDay() + 6) % 7;
-  return day + 1; // 1..7 (Mon..Sun)
+function n(v: any, fallback = 0) {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : fallback;
+}
+
+function clamp(v: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function round(v: any) {
+  return Math.round(Number(v) || 0);
+}
+
+function ageFromDobISO(dobIso?: string | null) {
+  if (!dobIso) return null;
+  const d = new Date(dobIso + "T00:00:00");
+  if (Number.isNaN(d.getTime())) return null;
+  const now = new Date();
+  let age = now.getFullYear() - d.getFullYear();
+  const m = now.getMonth() - d.getMonth();
+  if (m < 0 || (m === 0 && now.getDate() < d.getDate())) age--;
+  return clamp(age, 10, 90);
+}
+
+/**
+ * Calorie + protein engine
+ * - Requires at least weight + height (and age/dob or default age) to be considered OK
+ * - Uses Mifflin-St Jeor + activity factor
+ * - Goal adjust: lose (-400), gain (+250), maintain (0)
+ * - Protein target: 1.6g/kg
+ */
+function computeFromProfile(profile: any) {
+  const gender = String(profile?.gender ?? "").toLowerCase();
+  const heightCm = n(profile?.height_cm ?? profile?.height, 0);
+  const weightKg = n(profile?.weight_kg ?? profile?.weight, 0);
+
+  const age =
+    n(profile?.age, 0) > 0
+      ? clamp(n(profile?.age, 0), 10, 90)
+      : ageFromDobISO(profile?.dob ?? profile?.date_of_birth) ?? 28;
+
+  const hasBasics = heightCm > 0 && weightKg > 0 && age > 0;
+
+  const activityLevel = String(profile?.activity_level ?? profile?.activity ?? "moderate").toLowerCase();
+  const activityFactor =
+    activityLevel.includes("sedentary")
+      ? 1.2
+      : activityLevel.includes("light")
+        ? 1.375
+        : activityLevel.includes("very")
+          ? 1.725
+          : activityLevel.includes("active")
+            ? 1.55
+            : activityLevel.includes("moderate")
+              ? 1.55
+              : 1.55;
+
+  let bmr = 0;
+  if (hasBasics) {
+    const base = 10 * weightKg + 6.25 * heightCm - 5 * age;
+    if (gender === "male") bmr = base + 5;
+    else if (gender === "female") bmr = base - 161;
+    else bmr = base - 78;
+  }
+
+  const tdee = bmr > 0 ? bmr * activityFactor : 0;
+
+  const goal = String(profile?.goal ?? profile?.fitness_goal ?? "maintain").toLowerCase();
+  const deficit = goal.includes("lose") || goal.includes("cut") ? 400 : 0;
+  const surplus = goal.includes("gain") || goal.includes("bulk") ? 250 : 0;
+
+  const targetCalories = tdee > 0 ? clamp(tdee - deficit + surplus, 1200, 4500) : 0;
+  const proteinTarget = weightKg > 0 ? round(weightKg * 1.6) : 0;
+
+  // Daily burn target (simple, effective default)
+  const burnTarget =
+    goal.includes("lose") || goal.includes("cut") ? 450 : goal.includes("gain") || goal.includes("bulk") ? 250 : 350;
+
+  return {
+    ok: targetCalories > 0 && proteinTarget > 0,
+    targetCalories: round(targetCalories),
+    proteinTarget,
+    burnTarget,
+    weightKg,
+    heightCm,
+    age,
+    goal,
+  };
+}
+
+// --- Workout MET map
+function metForWorkoutType(t: string) {
+  const k = (t || "").toLowerCase();
+  if (k.includes("walk")) return 3.3;
+  if (k.includes("run")) return 9.8;
+  if (k.includes("cycle") || k.includes("bike")) return 7.5;
+  if (k.includes("swim")) return 8.0;
+  if (k.includes("hiit")) return 9.0;
+  if (k.includes("strength") || k.includes("weights") || k.includes("gym")) return 6.0;
+  if (k.includes("yoga")) return 2.5;
+  if (k.includes("sport") || k.includes("football") || k.includes("basketball")) return 8.0;
+  return 4.0;
 }
 
 type MealType = "breakfast" | "lunch" | "dinner" | "snack";
 
-type QuestTemplate = {
-  quest_id: string;
-  title: string;
-  xp_reward: number;
-};
+function mealLabel(t: MealType) {
+  if (t === "breakfast") return "Breakfast";
+  if (t === "lunch") return "Lunch";
+  if (t === "dinner") return "Dinner";
+  return "Snack";
+}
 
-const QUESTS: QuestTemplate[] = [
-  { quest_id: "log_steps", title: "Log your steps", xp_reward: 15 },
-  { quest_id: "log_water", title: "Drink & log 500ml water", xp_reward: 15 },
-  { quest_id: "log_sleep", title: "Log sleep hours", xp_reward: 10 },
-  { quest_id: "do_workout", title: "Log a workout session", xp_reward: 20 },
-];
+function toneCard(tone: "emerald" | "amber" | "rose" | "slate") {
+  if (tone === "emerald") return "border-emerald-500/30 bg-emerald-500/10";
+  if (tone === "amber") return "border-amber-500/30 bg-amber-500/10";
+  if (tone === "rose") return "border-rose-500/30 bg-rose-500/10";
+  return "border-white/10 bg-white/5";
+}
 
 export default function TodayPage() {
   const router = useRouter();
 
+  const [userId, setUserId] = useState<string>("");
+  const [profile, setProfile] = useState<any>(null);
+  const [meals, setMeals] = useState<any[]>([]);
+  const [workouts, setWorkouts] = useState<any[]>([]);
+  const [msg, setMsg] = useState("");
+
+  // ✅ Date selector (default: today)
   const [selectedDate, setSelectedDate] = useState<string>(() => yyyyMmDd(new Date()));
   const logDate = selectedDate;
 
-  const [email, setEmail] = useState("");
-  const [userId, setUserId] = useState<string>("");
-
-  const [goalSteps, setGoalSteps] = useState<number>(8000);
-  const [goalWorkoutsPerWeek, setGoalWorkoutsPerWeek] = useState<number>(3);
-
-  const [steps, setSteps] = useState<number>(0);
-  const [sleepHours, setSleepHours] = useState<number>(0);
-  const [waterMl, setWaterMl] = useState<number>(0);
-
-  const [mealType, setMealType] = useState<MealType>("breakfast");
-  const [mealTitle, setMealTitle] = useState("");
-  const [mealCalories, setMealCalories] = useState<string>("");
-  const [mealProtein, setMealProtein] = useState<string>("");
-  const [meals, setMeals] = useState<any[]>([]);
-
-  const [workoutType, setWorkoutType] = useState("Walk");
-  const [workoutMin, setWorkoutMin] = useState<number>(30);
-  const [workoutNotes, setWorkoutNotes] = useState("");
-  const [workouts, setWorkouts] = useState<any[]>([]);
-
-  const [workoutsThisWeek, setWorkoutsThisWeek] = useState<number>(0);
-  const [workoutSessionsThisWeek, setWorkoutSessionsThisWeek] = useState<number>(0);
-  const [workoutsExpectedBySelectedDate, setWorkoutsExpectedBySelectedDate] = useState<number>(0);
-  const [workoutPaceOnTrack, setWorkoutPaceOnTrack] = useState<boolean>(false);
-
-  const [globalTodaySteps, setGlobalTodaySteps] = useState<number>(0);
-  const [globalTodaySleep, setGlobalTodaySleep] = useState<number>(0);
-  const [globalTodayWater, setGlobalTodayWater] = useState<number>(0);
-
-  const [globalWeekDays, setGlobalWeekDays] = useState<number>(0);
-  const [globalWeekSessions, setGlobalWeekSessions] = useState<number>(0);
-  const [globalWeekExpectedByToday, setGlobalWeekExpectedByToday] = useState<number>(0);
-  const [globalWeekOnTrack, setGlobalWeekOnTrack] = useState<boolean>(false);
-
-  const [msg, setMsg] = useState<string>("");
-
-  const stepsPct = Math.min(100, Math.round((steps / Math.max(1, goalSteps)) * 100));
-  const onTrackSteps = steps >= goalSteps;
-
-  const totalCalories = meals.reduce((sum, m) => sum + (m.calories ?? 0), 0);
-  const totalProtein = meals.reduce((sum, m) => sum + (m.protein_g ?? 0), 0);
-  const totalWorkoutMin = workouts.reduce((sum, w) => sum + (w.duration_min ?? 0), 0);
-
-  // -----------------------------------
-  // Phase 3: Smart Feedback (non-AI)
-  // -----------------------------------
-  const WATER_TARGET = 2000; // ml
-  const SLEEP_MIN = 6; // hours
-
-  const weekDayIndex = dayIndexInWeek(logDate); // 1..7
-  const workoutsRemainingThisWeek = Math.max(0, goalWorkoutsPerWeek - workoutsThisWeek);
-
-  const smartInsightsSelected = (() => {
-    const items: { tone: "warn" | "ok"; title: string; detail: string }[] = [];
-
-    if (waterMl < WATER_TARGET) {
-      const deficit = WATER_TARGET - waterMl;
-      items.push({
-        tone: "warn",
-        title: "You’re underhydrated.",
-        detail: `You’re at ${waterMl}ml. Aim for +${deficit}ml to hit ${WATER_TARGET}ml today.`,
-      });
-    } else {
-      items.push({
-        tone: "ok",
-        title: "Hydration on track.",
-        detail: `Nice — ${waterMl}ml logged.`,
-      });
-    }
-
-    if (sleepHours > 0 && sleepHours < SLEEP_MIN) {
-      items.push({
-        tone: "warn",
-        title: "Sleep debt detected.",
-        detail: `You slept ${sleepHours}h. Try to get ${SLEEP_MIN}+ hours tonight.`,
-      });
-    } else if (sleepHours >= SLEEP_MIN) {
-      items.push({
-        tone: "ok",
-        title: "Sleep looks solid.",
-        detail: `${sleepHours}h logged.`,
-      });
-    } else {
-      items.push({
-        tone: "warn",
-        title: "Sleep not logged yet.",
-        detail: "Log sleep to track recovery and trends.",
-      });
-    }
-
-    if (!workoutPaceOnTrack) {
-      const need = Math.max(0, workoutsExpectedBySelectedDate - workoutsThisWeek);
-      const remaining = workoutsRemainingThisWeek;
-      const bySunday = remaining > 0 ? `You need ${remaining} workout${remaining === 1 ? "" : "s"} before Sunday.` : "You’re set for the week.";
-      items.push({
-        tone: "warn",
-        title: "Workout pace behind.",
-        detail: need > 0 ? `You’re behind pace by ${need} day(s). ${bySunday}` : bySunday,
-      });
-    } else {
-      const remaining = workoutsRemainingThisWeek;
-      items.push({
-        tone: "ok",
-        title: "Workout pace on track.",
-        detail: remaining > 0
-          ? `Great pace. ${remaining} workout${remaining === 1 ? "" : "s"} left before Sunday to hit your weekly goal.`
-          : "Weekly goal already hit — legend.",
-      });
-    }
-
-    return items;
-  })();
-
-  const smartInsightsGlobal = (() => {
-    const items: { tone: "warn" | "ok"; title: string; detail: string }[] = [];
-
-    if (globalTodayWater < WATER_TARGET) {
-      const deficit = WATER_TARGET - globalTodayWater;
-      items.push({
-        tone: "warn",
-        title: "Today: underhydrated.",
-        detail: `You’re at ${globalTodayWater}ml today. Aim for +${deficit}ml.`,
-      });
-    } else {
-      items.push({
-        tone: "ok",
-        title: "Today: hydration on track.",
-        detail: `${globalTodayWater}ml today.`,
-      });
-    }
-
-    if (globalTodaySleep > 0 && globalTodaySleep < SLEEP_MIN) {
-      items.push({
-        tone: "warn",
-        title: "Today: sleep debt detected.",
-        detail: `Only ${globalTodaySleep}h today. Try for ${SLEEP_MIN}+.`,
-      });
-    } else if (globalTodaySleep >= SLEEP_MIN) {
-      items.push({
-        tone: "ok",
-        title: "Today: sleep looks good.",
-        detail: `${globalTodaySleep}h today.`,
-      });
-    } else {
-      items.push({
-        tone: "warn",
-        title: "Today: sleep not logged.",
-        detail: "Log sleep to track recovery.",
-      });
-    }
-
-    if (!globalWeekOnTrack) {
-      const remaining = Math.max(0, goalWorkoutsPerWeek - globalWeekDays);
-      items.push({
-        tone: "warn",
-        title: "This week: workouts behind.",
-        detail: remaining > 0 ? `You need ${remaining} workout${remaining === 1 ? "" : "s"} before Sunday.` : "You’re set for the week.",
-      });
-    } else {
-      const remaining = Math.max(0, goalWorkoutsPerWeek - globalWeekDays);
-      items.push({
-        tone: "ok",
-        title: "This week: workouts on track.",
-        detail: remaining > 0
-          ? `${remaining} workout${remaining === 1 ? "" : "s"} left before Sunday to hit your weekly goal.`
-          : "Weekly goal already hit.",
-      });
-    }
-
-    return items;
-  })();
-
-  // -----------------------------
-  // Gamification helpers
-  // -----------------------------
-  async function ensureDailyQuests(uId: string, dateIso: string) {
-    for (const q of QUESTS) {
-      await supabase.from("daily_quests").upsert(
-        {
-          user_id: uId,
-          log_date: dateIso,
-          quest_id: q.quest_id,
-          title: q.title,
-          xp_reward: q.xp_reward,
-          completed: false,
-        },
-        { onConflict: "user_id,log_date,quest_id" }
-      );
-    }
-  }
-
-  async function completeQuest(questId: string) {
-    if (!userId) return;
-
-    await ensureDailyQuests(userId, logDate);
-
-    const { data: qRow, error: qErr } = await supabase
-      .from("daily_quests")
-      .select("completed,xp_reward")
-      .eq("user_id", userId)
-      .eq("log_date", logDate)
-      .eq("quest_id", questId)
-      .maybeSingle();
-
-    if (qErr) return;
-    if (qRow?.completed) return;
-
-    const { error: updErr } = await supabase
-      .from("daily_quests")
-      .update({ completed: true })
-      .eq("user_id", userId)
-      .eq("log_date", logDate)
-      .eq("quest_id", questId);
-
-    if (updErr) return;
-
-    const xpReward = qRow?.xp_reward ?? 10;
-
-    const { data: gs } = await supabase
-      .from("gamification_state")
-      .select("*")
-      .eq("user_id", userId)
-      .maybeSingle();
-
-    const currentXp = gs?.xp ?? 0;
-    const currentStreak = gs?.streak ?? 0;
-    const lastCompleted = gs?.last_completed_date ?? null;
-
-    let newXp = currentXp + xpReward;
-
-    const { data: allQ } = await supabase
-      .from("daily_quests")
-      .select("completed")
-      .eq("user_id", userId)
-      .eq("log_date", logDate);
-
-    const allDone = (allQ ?? []).length > 0 && (allQ ?? []).every((q: any) => q.completed);
-
-    let newStreak = currentStreak;
-    let newLast = lastCompleted;
-
-    if (allDone && newLast !== logDate) {
-      newXp += 25;
-      newStreak = computeStreak(currentStreak, lastCompleted, logDate);
-      newLast = logDate;
-      setMsg("🎉 All daily quests completed! Streak bonus +25 XP!");
-      setTimeout(() => setMsg(""), 1500);
-    } else {
-      setMsg(`✅ Quest completed: +${xpReward} XP`);
-      setTimeout(() => setMsg(""), 1200);
-    }
-
-    const newLevel = levelFromXp(newXp).level;
-
-    await supabase.from("gamification_state").upsert(
-      {
-        user_id: userId,
-        xp: newXp,
-        level: newLevel,
-        streak: newStreak,
-        last_completed_date: newLast,
-      },
-      { onConflict: "user_id" }
-    );
-  }
-
-  // -----------------------------
-  // Data loaders
-  // -----------------------------
-  async function loadWeeklyWorkoutPaceForSelectedDate(uId: string, workoutsPerWeekTarget: number) {
-    const weekStart = weekStartMondayISO(logDate);
-
-    const { data, error } = await supabase
-      .from("workout_logs")
-      .select("log_date")
-      .eq("user_id", uId)
-      .gte("log_date", weekStart)
-      .lte("log_date", logDate);
-
-    if (error) throw new Error(error.message);
-
-    const sessions = (data ?? []).length;
-
-    const uniqueDays = new Set<string>();
-    for (const r of data ?? []) if (r.log_date) uniqueDays.add(r.log_date);
-    const days = uniqueDays.size;
-
-    const idx = dayIndexInWeek(logDate);
-    const expected = Math.ceil((workoutsPerWeekTarget * idx) / 7);
-
-    setWorkoutSessionsThisWeek(sessions);
-    setWorkoutsThisWeek(days);
-    setWorkoutsExpectedBySelectedDate(expected);
-    setWorkoutPaceOnTrack(days >= expected);
-  }
-
-  async function loadDay(uId: string) {
-    await ensureDailyQuests(uId, logDate);
-
-    const { data: stepsRow, error: stepsErr } = await supabase
-      .from("daily_logs")
-      .select("steps")
-      .eq("user_id", uId)
-      .eq("log_date", logDate)
-      .maybeSingle();
-    if (stepsErr) throw new Error(stepsErr.message);
-    setSteps(stepsRow?.steps ?? 0);
-
-    const { data: sleepRow, error: sleepErr } = await supabase
-      .from("sleep_logs")
-      .select("hours")
-      .eq("user_id", uId)
-      .eq("log_date", logDate)
-      .maybeSingle();
-    if (sleepErr) throw new Error(sleepErr.message);
-    setSleepHours(Number(sleepRow?.hours ?? 0));
-
-    const { data: waterRow, error: waterErr } = await supabase
-      .from("water_logs")
-      .select("ml")
-      .eq("user_id", uId)
-      .eq("log_date", logDate)
-      .maybeSingle();
-    if (waterErr) throw new Error(waterErr.message);
-    setWaterMl(Number(waterRow?.ml ?? 0));
-
-    const { data: mealsRows, error: mealsErr } = await supabase
-      .from("meals")
-      .select("*")
-      .eq("user_id", uId)
-      .eq("log_date", logDate)
-      .order("created_at", { ascending: false });
-    if (mealsErr) throw new Error(mealsErr.message);
-    setMeals(mealsRows ?? []);
-
-    const { data: workoutRows, error: workoutErr } = await supabase
-      .from("workout_logs")
-      .select("*")
-      .eq("user_id", uId)
-      .eq("log_date", logDate)
-      .order("created_at", { ascending: false });
-    if (workoutErr) throw new Error(workoutErr.message);
-    setWorkouts(workoutRows ?? []);
-  }
-
-  async function loadGlobalToday(uId: string) {
-    const todayIso = yyyyMmDd(new Date());
-    const weekStart = weekStartMondayISO(todayIso);
-
-    const { data: stepsRow } = await supabase
-      .from("daily_logs")
-      .select("steps")
-      .eq("user_id", uId)
-      .eq("log_date", todayIso)
-      .maybeSingle();
-    setGlobalTodaySteps(stepsRow?.steps ?? 0);
-
-    const { data: sleepRow } = await supabase
-      .from("sleep_logs")
-      .select("hours")
-      .eq("user_id", uId)
-      .eq("log_date", todayIso)
-      .maybeSingle();
-    setGlobalTodaySleep(Number(sleepRow?.hours ?? 0));
-
-    const { data: waterRow } = await supabase
-      .from("water_logs")
-      .select("ml")
-      .eq("user_id", uId)
-      .eq("log_date", todayIso)
-      .maybeSingle();
-    setGlobalTodayWater(waterRow?.ml ?? 0);
-
-    const { data: wRows, error } = await supabase
-      .from("workout_logs")
-      .select("log_date")
-      .eq("user_id", uId)
-      .gte("log_date", weekStart)
-      .lte("log_date", todayIso);
-
-    if (error) throw new Error(error.message);
-
-    const sessions = (wRows ?? []).length;
-    const uniqueDays = new Set<string>();
-    for (const r of wRows ?? []) if (r.log_date) uniqueDays.add(r.log_date);
-
-    const days = uniqueDays.size;
-    const idx = dayIndexInWeek(todayIso);
-    const expected = Math.ceil((goalWorkoutsPerWeek * idx) / 7);
-
-    setGlobalWeekSessions(sessions);
-    setGlobalWeekDays(days);
-    setGlobalWeekExpectedByToday(expected);
-    setGlobalWeekOnTrack(days >= expected);
-  }
-
-  // -----------------------------
-  // Auth + goals initial load
-  // -----------------------------
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getUser();
       if (!data.user) return router.push("/login");
-
-      setEmail(data.user.email ?? "");
       setUserId(data.user.id);
 
-      const { data: goalRow, error: goalErr } = await supabase
-        .from("goals")
-        .select("steps_target, workouts_per_week_target")
+      // ✅ FIX: your profiles table uses `user_id` as the key (not `id`)
+      let p: any = null;
+
+      const { data: p1, error: p1Err } = await supabase
+        .from("profiles")
+        .select("*")
         .eq("user_id", data.user.id)
         .maybeSingle();
 
-      if (goalErr) return setMsg(goalErr.message);
-
-      if (!goalRow) {
-        const { error: insErr } = await supabase.from("goals").insert({
-          user_id: data.user.id,
-          steps_target: 8000,
-          workouts_per_week_target: 3,
-        });
-        if (insErr) return setMsg(insErr.message);
-        setGoalSteps(8000);
-        setGoalWorkoutsPerWeek(3);
+      if (!p1Err && p1) {
+        p = p1;
       } else {
-        setGoalSteps(goalRow.steps_target ?? 8000);
-        setGoalWorkoutsPerWeek(goalRow.workouts_per_week_target ?? 3);
+        // fallback in case schema differs in another env
+        const { data: p2 } = await supabase.from("profiles").select("*").eq("id", data.user.id).maybeSingle();
+        p = p2 ?? null;
       }
 
-      const { data: gs } = await supabase
-        .from("gamification_state")
-        .select("user_id")
-        .eq("user_id", data.user.id)
-        .maybeSingle();
-
-      if (!gs) await supabase.from("gamification_state").insert({ user_id: data.user.id });
+      setProfile(p);
     })();
   }, [router]);
 
-  // -----------------------------
-  // Reload when selected date changes
-  // -----------------------------
+  // Load meals + workouts for selected date
   useEffect(() => {
     if (!userId) return;
     (async () => {
       setMsg("");
-      try {
-        await loadDay(userId);
-        await loadWeeklyWorkoutPaceForSelectedDate(userId, goalWorkoutsPerWeek || 3);
-        await loadGlobalToday(userId);
-      } catch (e: any) {
-        setMsg(e?.message ?? "Something went wrong");
-      }
+      const [{ data: m, error: mErr }, { data: w, error: wErr }] = await Promise.all([
+        supabase.from("meals").select("*").eq("user_id", userId).eq("log_date", logDate).order("created_at", { ascending: false }),
+        supabase
+          .from("workout_logs")
+          .select("*")
+          .eq("user_id", userId)
+          .eq("log_date", logDate)
+          .order("created_at", { ascending: false }),
+      ]);
+
+      if (mErr) setMsg(mErr.message);
+      if (wErr) setMsg(wErr.message);
+
+      setMeals(m ?? []);
+      setWorkouts(w ?? []);
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, logDate, goalWorkoutsPerWeek]);
+  }, [userId, logDate]);
 
-  // -----------------------------
-  // Save handlers
-  // -----------------------------
-  async function saveGoalSteps() {
-    setMsg("");
-    if (!userId) return;
+  const plan = useMemo(() => computeFromProfile(profile), [profile]);
 
-    const { error } = await supabase.from("goals").upsert(
-      { user_id: userId, steps_target: Number.isFinite(goalSteps) ? goalSteps : 8000 },
-      { onConflict: "user_id" }
-    );
-    if (error) return setMsg(error.message);
+  const totalCalories = useMemo(() => (meals ?? []).reduce((s, m) => s + n(m.calories, 0), 0), [meals]);
+  const totalProtein = useMemo(() => (meals ?? []).reduce((s, m) => s + n(m.protein_g, 0), 0), [meals]);
 
-    setMsg("✅ Step goal saved!");
-    setTimeout(() => setMsg(""), 1200);
-    await loadGlobalToday(userId);
-  }
+  const weightKgForBurn = plan.weightKg > 0 ? plan.weightKg : 65;
 
-  async function saveGoalWorkoutsPerWeek() {
-    setMsg("");
-    if (!userId) return;
+  const workoutCalories = useMemo(() => {
+    return (workouts ?? []).reduce((sum, w) => {
+      const met = metForWorkoutType(String(w.workout_type ?? ""));
+      const minutes = n(w.duration_min ?? w.minutes ?? w.duration, 0);
+      const hours = minutes / 60;
+      const kcal = met * weightKgForBurn * hours;
+      return sum + Math.max(0, round(kcal));
+    }, 0);
+  }, [workouts, weightKgForBurn]);
 
-    const safe = Number.isFinite(goalWorkoutsPerWeek) ? goalWorkoutsPerWeek : 3;
+  const netCalories = totalCalories - workoutCalories;
 
-    const { error } = await supabase.from("goals").upsert(
-      { user_id: userId, workouts_per_week_target: safe },
-      { onConflict: "user_id" }
-    );
-    if (error) return setMsg(error.message);
+  // --------------------
+  // Meals grouped blocks
+  // --------------------
+  const mealsByType = useMemo(() => {
+    const out: Record<MealType, any[]> = {
+      breakfast: [],
+      lunch: [],
+      dinner: [],
+      snack: [],
+    };
 
-    setMsg("✅ Workout goal saved!");
-    setTimeout(() => setMsg(""), 1200);
+    for (const m of meals ?? []) {
+      const t = (String(m.meal_type ?? "").toLowerCase() as MealType) || "snack";
+      if (out[t]) out[t].push(m);
+      else out.snack.push(m);
+    }
 
-    await loadWeeklyWorkoutPaceForSelectedDate(userId, safe);
-    await loadGlobalToday(userId);
-  }
+    for (const k of Object.keys(out) as MealType[]) {
+      out[k] = out[k].slice().sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
+    }
 
-  async function saveSteps() {
-    setMsg("");
-    if (!userId) return;
+    return out;
+  }, [meals]);
 
-    const { error } = await supabase.from("daily_logs").upsert(
-      { user_id: userId, log_date: logDate, steps, updated_at: new Date().toISOString() },
-      { onConflict: "user_id,log_date" }
-    );
-    if (error) return setMsg(error.message);
+  // --------------------
+  // Smart feedback: calories
+  // --------------------
+  const calorieFeedback = useMemo(() => {
+    const target = plan.targetCalories;
 
-    setMsg("✅ Steps saved!");
-    setTimeout(() => setMsg(""), 900);
+    if (!plan.ok || !target) {
+      return {
+        tone: "amber" as const,
+        title: "Complete your profile to unlock targets",
+        text: "Add weight, height, gender, goal, and activity level in Profile. Then we’ll auto-calculate your calorie + protein plan.",
+        sub: "(It takes 30 seconds. Future you will thank you.)",
+      };
+    }
 
-    await completeQuest("log_steps");
-    await loadGlobalToday(userId);
-  }
+    const delta = netCalories - target;
+    const pct = Math.abs(delta) / target;
 
-  async function saveSleep() {
-    setMsg("");
-    if (!userId) return;
+    const ateHigh = totalCalories > target * 1.1;
+    const ateLow = totalCalories < target * 0.9;
+    const burnLow = workoutCalories < plan.burnTarget * 0.9;
 
-    const { error } = await supabase.from("sleep_logs").upsert(
-      { user_id: userId, log_date: logDate, hours: sleepHours },
-      { onConflict: "user_id,log_date" }
-    );
-    if (error) return setMsg(error.message);
+    if (pct <= 0.1) {
+      return {
+        tone: "emerald" as const,
+        title: "🔥 You’re on point",
+        text: `Net ${round(netCalories)} kcal vs target ${target} kcal — within 10%. That’s real consistency.`,
+        sub: "Small wins compound. Keep the streak alive.",
+      };
+    }
 
-    setMsg("✅ Sleep saved!");
-    setTimeout(() => setMsg(""), 900);
+    if (pct <= 0.25) {
+      if (delta > 0) {
+        const hint = burnLow ? "Try a short 20–30 min session or a post-meal walk." : "Slightly lighter dinner + keep your movement — easy fix.";
+        return {
+          tone: "amber" as const,
+          title: "Almost there 💪",
+          text: `You’re about ${round(Math.abs(delta))} kcal over target. ${hint}`,
+          sub: ateHigh ? "Your meals are a bit heavy today — tighten the last 10%." : "You’re close — don’t overthink it.",
+        };
+      }
 
-    await completeQuest("log_sleep");
-    await loadGlobalToday(userId);
-  }
+      const hint = ateLow ? "Add a clean snack: yogurt, eggs, paneer, or a banana + whey." : "You’re moving a lot — make sure you’re fueling recovery.";
+      return {
+        tone: "amber" as const,
+        title: "Close… just nudge it",
+        text: `You’re about ${round(Math.abs(delta))} kcal under target. ${hint}`,
+        sub: "No hero points for under-eating. Sustainable = results.",
+      };
+    }
 
-  async function saveWater() {
-    setMsg("");
-    if (!userId) return;
+    if (delta > 0) {
+      const hint = burnLow
+        ? "Today’s movement is whispering while the calories are yelling."
+        : "Calories are winning today. You can still salvage with a solid session + lighter dinner.";
+      return {
+        tone: "rose" as const,
+        title: "👀 We need a comeback arc",
+        text: `You’re ${round(Math.abs(delta))} kcal over target. ${hint}`,
+        sub: "Tomorrow: main character energy, not side-character snacking 😅",
+      };
+    }
 
-    const { error } = await supabase.from("water_logs").upsert(
-      { user_id: userId, log_date: logDate, ml: waterMl },
-      { onConflict: "user_id,log_date" }
-    );
-    if (error) return setMsg(error.message);
+    return {
+      tone: "rose" as const,
+      title: "🥲 This isn’t a survival show",
+      text: `You’re ${round(Math.abs(delta))} kcal under target. Eat properly — your body is not a phone battery.`,
+      sub: "Fuel = performance. Performance = results.",
+    };
+  }, [plan.ok, plan.targetCalories, plan.burnTarget, netCalories, totalCalories, workoutCalories, plan]);
 
-    setMsg("✅ Water saved!");
-    setTimeout(() => setMsg(""), 900);
+  // --------------------
+  // Smart feedback: burn
+  // --------------------
+  const burnFeedback = useMemo(() => {
+    if (!plan.ok || !plan.burnTarget) {
+      return {
+        tone: "slate" as const,
+        title: "Burn target will show here",
+        text: "Once Profile is complete, we’ll guide you with a daily burn target too.",
+        sub: "(For now, logging workouts still helps.)",
+      };
+    }
 
-    if (waterMl >= 500) await completeQuest("log_water");
-    await loadGlobalToday(userId);
-  }
+    const target = plan.burnTarget;
+    const delta = workoutCalories - target;
+    const pct = Math.abs(delta) / Math.max(1, target);
 
-  async function addMeal() {
-    setMsg("");
-    if (!userId) return;
-    if (!mealTitle.trim()) return setMsg("Meal name required");
+    if (pct <= 0.1) {
+      return {
+        tone: "emerald" as const,
+        title: "🏃 Burn target hit",
+        text: `Burned ${round(workoutCalories)} kcal vs target ${target} kcal — within 10%. Beautiful.`,
+        sub: "This is what discipline looks like.",
+      };
+    }
 
-    const caloriesVal = mealCalories.trim() === "" ? null : parseInt(mealCalories, 10);
-    const proteinVal = mealProtein.trim() === "" ? null : parseInt(mealProtein, 10);
+    if (delta < 0) {
+      if (pct <= 0.5) {
+        return {
+          tone: "amber" as const,
+          title: "Let’s push a bit more",
+          text: `You’re short by ~${round(Math.abs(delta))} kcal. A 20–30 min walk can close most of this.`,
+          sub: "Future you is watching 👀",
+        };
+      }
+      return {
+        tone: "rose" as const,
+        title: "Movement is missing today",
+        text: `You’re way under burn target (short by ~${round(Math.abs(delta))} kcal). Even a quick session is better than zero.`,
+        sub: "No pressure… but also: yes pressure 😅",
+      };
+    }
 
-    const { data, error } = await supabase
-      .from("meals")
-      .insert({
-        user_id: userId,
-        log_date: logDate,
-        meal_type: mealType,
-        title: mealTitle.trim(),
-        calories: Number.isFinite(caloriesVal as any) ? caloriesVal : null,
-        protein_g: Number.isFinite(proteinVal as any) ? proteinVal : null,
-      })
-      .select("*")
-      .single();
+    if (delta <= target * 0.5) {
+      return {
+        tone: "emerald" as const,
+        title: "🔥 Extra burn unlocked",
+        text: `You’re above target by ~${round(delta)} kcal. Solid work — that’s a strong day.`,
+        sub: "Eat + sleep well so recovery matches the grind.",
+      };
+    }
 
-    if (error) return setMsg(error.message);
-
-    setMeals((prev) => [data, ...prev]);
-    setMealTitle("");
-    setMealCalories("");
-    setMealProtein("");
-
-    setMsg("✅ Meal added!");
-    setTimeout(() => setMsg(""), 1200);
-  }
-
-  async function deleteMeal(id: string) {
-    setMsg("");
-    const { error } = await supabase.from("meals").delete().eq("id", id);
-    if (error) return setMsg(error.message);
-    setMeals((prev) => prev.filter((m) => m.id !== id));
-  }
-
-  async function addWorkout() {
-    setMsg("");
-    if (!userId) return;
-
-    const { data, error } = await supabase
-      .from("workout_logs")
-      .insert({
-        user_id: userId,
-        log_date: logDate,
-        workout_type: workoutType,
-        duration_min: workoutMin,
-        notes: workoutNotes.trim() || null,
-      })
-      .select("*")
-      .single();
-
-    if (error) return setMsg(error.message);
-
-    setWorkouts((prev) => [data, ...prev]);
-    setWorkoutNotes("");
-
-    setMsg("✅ Workout added!");
-    setTimeout(() => setMsg(""), 900);
-
-    await completeQuest("do_workout");
-    await loadWeeklyWorkoutPaceForSelectedDate(userId, goalWorkoutsPerWeek);
-    await loadGlobalToday(userId);
-  }
-
-  async function deleteWorkout(id: string) {
-    setMsg("");
-    const { error } = await supabase.from("workout_logs").delete().eq("id", id);
-    if (error) return setMsg(error.message);
-
-    setWorkouts((prev) => prev.filter((w) => w.id !== id));
-    await loadWeeklyWorkoutPaceForSelectedDate(userId, goalWorkoutsPerWeek);
-    await loadGlobalToday(userId);
-  }
-
-  async function logout() {
-    await supabase.auth.signOut();
-    router.push("/login");
-  }
-
-  const realTodayIso = yyyyMmDd(new Date());
-  const quote = getDailyQuote(new Date());
+    return {
+      tone: "rose" as const,
+      title: "😳 Okay calm down, superhero",
+      text: `You burned ~${round(workoutCalories)} kcal (way above target). Love the energy — but don’t overdo it.`,
+      sub: "Hydrate, stretch, and please don’t fight the treadmill tomorrow.",
+    };
+  }, [plan.ok, plan.burnTarget, workoutCalories]);
 
   return (
-    <div className="space-y-4">
-      {/* Header row */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold">Daily Check-in</h1>
-          <p className="text-sm text-zinc-300/70">
-            Editing: <b className="text-zinc-100">{logDate}</b> • {email}
-          </p>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="rounded-2xl bg-gradient-to-br from-white/10 to-white/5 p-6 border border-white/10">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-2xl font-extrabold tracking-tight text-white">Today</div>
+            <div className="text-sm text-white/60">Your daily snapshot — quick, clear, actionable.</div>
+          </div>
 
-          <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-sm backdrop-blur">
-            <span className={onTrackSteps ? "text-emerald-300" : "text-amber-300"}>
-              {onTrackSteps ? "✅ Steps On Track" : "⚠️ Steps Behind"}
-            </span>
-            <span className="text-white/60">
-              {steps}/{goalSteps}
-            </span>
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-white/60">Date</div>
+            <input
+              type="date"
+              value={logDate}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              className="rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white"
+            />
+            <button
+              type="button"
+              onClick={() => setSelectedDate(yyyyMmDd(new Date()))}
+              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/85 hover:bg-white/10"
+            >
+              Today
+            </button>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <input
-            type="date"
-            value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
-            className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white backdrop-blur focus:outline-none"
-          />
-
-          <button
-            onClick={() => setSelectedDate(yyyyMmDd(new Date()))}
-            className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm hover:bg-white/10 backdrop-blur"
-          >
-            Today
-          </button>
-
-
-          <button
-            onClick={() => router.push("/profile")}
-            className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm hover:bg-white/10 backdrop-blur"
-          >
-            Profile
-          </button>
-
-          <button
-            onClick={logout}
-            className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm hover:bg-white/10 backdrop-blur"
-          >
-            Logout
-          </button>
-        </div>
+        {msg ? <div className="mt-3 text-sm text-white/70">{msg}</div> : null}
       </div>
 
-      {/* Motivational Quote Card */}
-      <div className="rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur-md">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-sm text-white/70">Today’s push</div>
-          <div className="text-xs text-white/50">{realTodayIso}</div>
-        </div>
-        <p className="mt-2 text-lg italic text-white/90">“{quote}”</p>
-      </div>
-
-      {/* ✅ Phase 3 Smart Feedback Panel */}
-      <div className="rounded-2xl border border-white/10 bg-gradient-to-b from-white/10 to-white/5 p-4 backdrop-blur-md">
-        <div className="flex items-center justify-between">
+      {/* Energy Summary */}
+      <div className="rounded-2xl bg-gradient-to-br from-white/10 to-white/5 p-6 border border-white/10">
+        <div className="flex flex-wrap items-end justify-between gap-2">
           <div>
-            <div className="text-sm font-medium text-white/90">🧠 Smart Coach</div>
-            <div className="text-xs text-white/50">
-              Insight for <b className="text-white/80">{logDate}</b> (no AI — just smart logic)
+            <div className="text-xl font-semibold text-white">Energy Summary</div>
+            <div className="text-sm text-white/60">Target → Intake → Burn → Net (what really matters)</div>
+          </div>
+          <div className="text-xs text-white/50">Net = Intake − Burn</div>
+        </div>
+
+        <div className="grid md:grid-cols-4 gap-4 mt-4">
+          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
+            <div className="text-xs text-white/50">🎯 Target</div>
+            <div className="text-lg font-bold text-white">{plan.ok ? `${plan.targetCalories} kcal` : "--"}</div>
+            <div className="text-xs text-white/40">Protein: {plan.ok ? `${plan.proteinTarget}g` : "--"}</div>
+          </div>
+
+          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
+            <div className="text-xs text-white/50">🍽 Intake</div>
+            <div className="text-lg font-bold text-white">{round(totalCalories)} kcal</div>
+            <div className="text-xs text-white/40">Protein: {round(totalProtein)}g</div>
+          </div>
+
+          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
+            <div className="text-xs text-white/50">🏃 Burn</div>
+            <div className="text-lg font-bold text-white">{round(workoutCalories)} kcal</div>
+            <div className="text-xs text-white/40">Burn target: {plan.ok ? `${plan.burnTarget} kcal` : "--"}</div>
+          </div>
+
+          <div className="bg-black/30 rounded-xl p-4 border border-white/10">
+            <div className="text-xs text-white/50">🧾 Net</div>
+            <div className="text-lg font-bold text-white">{round(netCalories)} kcal</div>
+            <div className="text-xs text-white/40">
+              vs target: {plan.ok ? `${round(netCalories - plan.targetCalories)} kcal` : "--"}
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Feedback cards */}
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className={cx("rounded-2xl p-6 border", toneCard(calorieFeedback.tone))}>
+          <div className="text-lg font-semibold text-white">{calorieFeedback.title}</div>
+          <div className="text-sm mt-2 text-white/75">{calorieFeedback.text}</div>
+          {calorieFeedback.sub ? <div className="text-xs mt-2 text-white/55">{calorieFeedback.sub}</div> : null}
+        </div>
+
+        <div className={cx("rounded-2xl p-6 border", toneCard(burnFeedback.tone))}>
+          <div className="text-lg font-semibold text-white">{burnFeedback.title}</div>
+          <div className="text-sm mt-2 text-white/75">{burnFeedback.text}</div>
+          {burnFeedback.sub ? <div className="text-xs mt-2 text-white/55">{burnFeedback.sub}</div> : null}
+        </div>
+      </div>
+
+      {/* Meals by time of day */}
+      <div className="rounded-2xl bg-gradient-to-br from-white/10 to-white/5 p-6 border border-white/10">
+        <div className="flex items-end justify-between gap-2">
+          <div>
+            <div className="text-xl font-semibold text-white">Meals Logged</div>
+            <div className="text-sm text-white/60">Grouped by meal type — exactly how humans think.</div>
           </div>
           <div className="text-xs text-white/50">
-            Week day: <b className="text-white/80">{weekDayIndex}/7</b>
+            {meals.length} item{meals.length === 1 ? "" : "s"}
           </div>
         </div>
 
-        <div className="mt-3 grid gap-3 md:grid-cols-3">
-          {smartInsightsSelected.map((it, idx) => (
-            <div
-              key={idx}
-              className={`rounded-xl border p-3 ${
-                it.tone === "warn"
-                  ? "border-amber-500/30 bg-amber-500/10"
-                  : "border-emerald-500/25 bg-emerald-500/10"
-              }`}
-            >
-              <div className="text-sm font-medium text-white/90">{it.title}</div>
-              <div className="mt-1 text-xs text-white/60">{it.detail}</div>
-            </div>
-          ))}
-        </div>
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mt-4">
+          {(["breakfast", "lunch", "dinner", "snack"] as MealType[]).map((t) => {
+            const list = mealsByType[t] ?? [];
+            const sumC = list.reduce((s, m) => s + n(m.calories, 0), 0);
+            const sumP = list.reduce((s, m) => s + n(m.protein_g, 0), 0);
 
-        <div className="mt-3 text-xs text-white/50">
-          Tip: If workouts are behind, the fastest fix is a <b className="text-white/80">20–30 min</b> session today.
+            return (
+              <div key={t} className="rounded-2xl border border-white/10 bg-black/25 p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="text-sm font-bold text-white">{mealLabel(t)}</div>
+                    <div className="text-xs text-white/50">
+                      {round(sumC)} kcal • {round(sumP)}g protein
+                    </div>
+                  </div>
+                  <div className="text-xs text-white/50">{list.length}</div>
+                </div>
+
+                <div className="mt-3 space-y-2">
+                  {list.length === 0 ? (
+                    <div className="text-xs text-white/50">No items yet.</div>
+                  ) : (
+                    list.map((m: any) => (
+                      <div key={m.id ?? `${m.title}-${m.created_at}`} className="rounded-xl border border-white/10 bg-black/30 p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-semibold text-white/90">
+                              {String(m.food_name ?? m.title ?? "Meal")}
+                            </div>
+                            <div className="text-xs text-white/50">
+                              {m.grams != null && n(m.grams, 0) > 0 ? `${round(m.grams)}g` : ""}
+                              {m.grams != null && n(m.grams, 0) > 0 ? " • " : ""}
+                              {m.created_at
+                                ? new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                                : ""}
+                            </div>
+                          </div>
+
+                          <div className="shrink-0 text-right">
+                            <div className="text-xs text-white/60">{round(m.calories)} kcal</div>
+                            <div className="text-xs text-white/45">{round(m.protein_g)}g protein</div>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 
-      {/* Global Today View */}
-      <div className="rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur-md">
-        <div className="flex items-center justify-between">
+      {/* Workouts list */}
+      <div className="rounded-2xl bg-gradient-to-br from-white/10 to-white/5 p-6 border border-white/10">
+        <div className="flex items-end justify-between gap-2">
           <div>
-            <div className="text-sm font-medium text-white/90">📍 Where are we at today?</div>
-            <div className="text-xs text-white/50">
-              Always <b className="text-white/80">{realTodayIso}</b> (even if you’re editing{" "}
-              <b className="text-white/80">{logDate}</b>)
-            </div>
+            <div className="text-xl font-semibold text-white">Workouts</div>
+            <div className="text-sm text-white/60">Estimated burn (MET-based) from your logged sessions.</div>
           </div>
-
-          <div
-            className={`rounded-full border px-3 py-1 text-xs ${
-              globalTodaySteps >= goalSteps
-                ? "border-emerald-500/40 text-emerald-300"
-                : "border-amber-500/40 text-amber-300"
-            }`}
-          >
-            {globalTodaySteps >= goalSteps ? "✅ On track" : "⚠️ Behind"}
+          <div className="text-xs text-white/50">
+            {workouts.length} session{workouts.length === 1 ? "" : "s"}
           </div>
         </div>
 
-        <div className="mt-3 grid gap-3 md:grid-cols-4">
-          <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-            <div className="text-xs text-white/50">👣 Steps (today)</div>
-            <div className="mt-1 text-lg font-semibold">
-              {globalTodaySteps} <span className="text-white/50 text-sm">/ {goalSteps}</span>
-            </div>
-          </div>
+        <div className="mt-4 space-y-2">
+          {workouts.length === 0 ? (
+            <div className="text-sm text-white/60">No workouts logged for this day.</div>
+          ) : (
+            workouts.map((w: any) => {
+              const met = metForWorkoutType(String(w.workout_type ?? ""));
+              const min = n(w.duration_min ?? w.minutes ?? w.duration, 0);
+              const kcal = Math.max(0, round(met * weightKgForBurn * (min / 60)));
+              return (
+                <div key={w.id ?? `${w.workout_type}-${w.created_at}`} className="rounded-2xl border border-white/10 bg-black/25 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-white">{String(w.workout_type ?? "Workout")}</div>
+                      <div className="text-xs text-white/55">
+                        {min} min • est {kcal} kcal
+                        {w.created_at ? ` • ${new Date(w.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-xs text-white/60">MET {met}</div>
+                      <div className="text-xs text-white/45">wt {round(weightKgForBurn)}kg</div>
+                    </div>
+                  </div>
 
-          <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-            <div className="text-xs text-white/50">😴 Sleep (today)</div>
-            <div className="mt-1 text-lg font-semibold">{globalTodaySleep} hrs</div>
-          </div>
-
-          <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-            <div className="text-xs text-white/50">💧 Water (today)</div>
-            <div className="mt-1 text-lg font-semibold">{globalTodayWater} ml</div>
-          </div>
-
-          <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-            <div className="text-xs text-white/50">🏋️ Weekly workout pace</div>
-            <div className="mt-1 text-lg font-semibold">
-              {globalWeekDays}
-              <span className="text-white/50 text-sm"> / {goalWorkoutsPerWeek}</span>
-            </div>
-            <div className="mt-1 text-xs text-white/50">
-              Sessions: <b className="text-white/80">{globalWeekSessions}</b> • Expected:{" "}
-              <b className="text-white/80">{globalWeekExpectedByToday}</b>
-            </div>
-            <div className={`mt-1 text-xs ${globalWeekOnTrack ? "text-emerald-300" : "text-amber-300"}`}>
-              {globalWeekOnTrack ? "On track" : "Behind"}
-            </div>
-          </div>
-        </div>
-
-        {/* Optional extra: Global Smart Coach (Today) */}
-        <div className="mt-3 grid gap-3 md:grid-cols-3">
-          {smartInsightsGlobal.map((it, idx) => (
-            <div
-              key={idx}
-              className={`rounded-xl border p-3 ${
-                it.tone === "warn"
-                  ? "border-amber-500/30 bg-amber-500/10"
-                  : "border-emerald-500/25 bg-emerald-500/10"
-              }`}
-            >
-              <div className="text-sm font-medium text-white/90">{it.title}</div>
-              <div className="mt-1 text-xs text-white/60">{it.detail}</div>
-            </div>
-          ))}
+                  {w.notes ? <div className="mt-2 text-xs text-white/60">{String(w.notes)}</div> : null}
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
 
-
-      {msg && (
-        <p className={`text-sm ${msg.includes("✅") || msg.includes("🎉") ? "text-emerald-300" : "text-red-300"}`}>
-          {msg}
-        </p>
-      )}
+      <div className="text-center text-xs text-white/45">You don’t need perfect days. You need consistent days.</div>
     </div>
   );
 }
