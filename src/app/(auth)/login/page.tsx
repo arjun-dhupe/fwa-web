@@ -14,52 +14,65 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
 
   async function submit() {
-    setMsg("");
-    setLoading(true);
+  setMsg("");
+  setLoading(true);
+
+  const e = email.trim();
+  const p = password.trim();
+
+  try {
+    if (!e || !p) {
+      setMsg("Email + password required.");
+      return;
+    }
+
+    // 1) Try server proxy first (best for networks that block supabase.co)
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 12000); // 12s timeout
 
     try {
-      const e = email.trim();
-      const p = password.trim();
-
-      if (!e || !p) {
-        setMsg("Email + password required.");
-        return;
-      }
-
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: e, password: p }),
+        signal: controller.signal,
       });
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || "Login failed");
 
       const s = data?.session;
-      if (!s?.access_token || !s?.refresh_token) {
-        throw new Error(
-          data?.error ||
-            "Login succeeded but no session tokens were returned. If you just signed up, confirm your email and try again."
-        );
-      }
+      if (!s?.access_token || !s?.refresh_token) throw new Error("Login response missing tokens");
 
       const { error: setErr } = await supabase.auth.setSession({
         access_token: s.access_token,
         refresh_token: s.refresh_token,
       });
-
       if (setErr) throw setErr;
 
-      await supabase.auth.getUser();
-
-      router.replace("/today");
-      router.refresh();
-    } catch (e: any) {
-      setMsg(e?.message ?? "Something went wrong");
+      router.push("/today");
+      return;
     } finally {
-      setLoading(false);
+      clearTimeout(t);
     }
+  } catch (proxyErr: any) {
+    // 2) Fallback: direct Supabase login (best for networks that block your Vercel API route)
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email: e, password: p });
+      if (error) throw error;
+      if (!data?.session) throw new Error("No session returned");
+
+      router.push("/today");
+      return;
+    } catch (directErr: any) {
+      setMsg(directErr?.message || proxyErr?.message || "Login failed");
+    }
+  } finally {
+    setLoading(false);
   }
+}
+
+     
 
   const row = (
     <div className="marquee__row">
