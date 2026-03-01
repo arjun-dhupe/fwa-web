@@ -27,14 +27,35 @@ export default function SignupPage() {
       }
 
       // ✅ SIGNUP via server proxy
-      const res = await fetch("/api/auth/signup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: e, password: p }),
-      });
+      // Add no-store + same-origin to avoid cached/old route artifacts and improve reliability on Vercel.
+      let res: Response;
+      try {
+        res = await fetch("/api/auth/signup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: e, password: p }),
+          cache: "no-store",
+          credentials: "same-origin",
+        });
+      } catch {
+        // True network failure (DNS/VPN/blocked/airplane mode/etc.)
+        throw new Error(
+          "Network error (Failed to fetch). Try: 1) turn off VPN/adblock 2) switch Wi‑Fi ↔ mobile data 3) refresh and retry."
+        );
+      }
 
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || "Signup failed");
+      // Some failures return non-JSON (e.g., HTML error pages). Handle safely.
+      const text = await res.text();
+      let data: any = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = {};
+      }
+
+      if (!res.ok) {
+        throw new Error(data?.error || `Signup failed (${res.status})`);
+      }
 
       setMsg("✅ Account created. Now login.");
       // send them to login with same vibe

@@ -16,7 +16,10 @@ export async function POST(req: Request) {
     const { email, password } = await req.json();
 
     if (!email || !password) {
-      return NextResponse.json({ error: "Email and password required" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Email and password required" },
+        { status: 400 }
+      );
     }
 
     const supabase = supa();
@@ -27,11 +30,17 @@ export async function POST(req: Request) {
     });
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
+      return NextResponse.json(
+        { error: error.message },
+        { status: 400 }
+      );
     }
 
-    return NextResponse.json({ user: data.user });
+    return NextResponse.json({ ok: true });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json(
+      { error: err.message || "Server error" },
+      { status: 500 }
+    );
   }
 }

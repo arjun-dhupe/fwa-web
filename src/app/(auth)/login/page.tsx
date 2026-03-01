@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { supabase } from "@/lib/supabase";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
@@ -37,17 +36,8 @@ export default function LoginPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || "Login failed");
 
-      const s = data?.session;
-      if (!s?.access_token || !s?.refresh_token) {
-        throw new Error("Login response missing tokens");
-      }
-
-      const { error: setErr } = await supabase.auth.setSession({
-        access_token: s.access_token,
-        refresh_token: s.refresh_token,
-      });
-      if (setErr) throw setErr;
-
+      // ✅ No client-side supabase session set here.
+      // The server route sets httpOnly cookies.
       router.push("/today");
     } catch (e: any) {
       setMsg(e?.message ?? "Something went wrong");

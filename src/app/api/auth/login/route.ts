@@ -16,7 +16,10 @@ export async function POST(req: Request) {
     const { email, password } = await req.json();
 
     if (!email || !password) {
-      return NextResponse.json({ error: "Email and password required" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Email and password required" },
+        { status: 400 }
+      );
     }
 
     const supabase = supa();
@@ -26,12 +29,35 @@ export async function POST(req: Request) {
       password,
     });
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
+    if (error || !data.session) {
+      return NextResponse.json(
+        { error: error?.message || "Login failed" },
+        { status: 400 }
+      );
     }
 
-    return NextResponse.json({ session: data.session });
+    const res = NextResponse.json({ ok: true });
+
+    // ✅ Set httpOnly cookies (browser never sees tokens)
+    res.cookies.set("sb-access-token", data.session.access_token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      path: "/",
+    });
+
+    res.cookies.set("sb-refresh-token", data.session.refresh_token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      path: "/",
+    });
+
+    return res;
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json(
+      { error: err.message || "Server error" },
+      { status: 500 }
+    );
   }
 }
