@@ -14,28 +14,19 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
 
   async function submit() {
-  setMsg("");
-  setLoading(true);
+    setMsg("");
+    setLoading(true);
 
-  const e = email.trim();
-  const p = password.trim();
+    const e = email.trim();
+    const p = password.trim();
 
-  try {
-    if (!e || !p) {
-      setMsg("Email + password required.");
-      return;
-    }
-
-    // 1) Try server proxy first (best for networks that block supabase.co)
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 12000); // 12s timeout
-
-    try {
+    // small helper: retry proxy once to reduce flaky network failures
+    async function proxyLoginOnce(signal: AbortSignal) {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: e, password: p }),
-        signal: controller.signal,
+        signal,
       });
 
       const data = await res.json().catch(() => ({}));
@@ -50,27 +41,62 @@ export default function LoginPage() {
       });
       if (setErr) throw setErr;
 
-      router.push("/today");
-      return;
-    } finally {
-      clearTimeout(t);
+      // ensure the client sees the fresh session before navigation
+      await supabase.auth.getSession();
     }
-  } catch (proxyErr: any) {
-    // 2) Fallback: direct Supabase login (best for networks that block your Vercel API route)
+
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email: e, password: p });
-      if (error) throw error;
-      if (!data?.session) throw new Error("No session returned");
+      if (!e || !p) {
+        setMsg("Email + password required.");
+        return;
+      }
+
+      // 1) Try server proxy first (best for networks that block supabase.co)
+      // Use a shorter timeout so users don't stare at "Working..." forever.
+      try {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
+        try {
+          await proxyLoginOnce(controller.signal);
+        } finally {
+          clearTimeout(t);
+        }
+      } catch (proxyErr: any) {
+        // Retry once (helps with occasional Vercel edge/network blips)
+        const controller2 = new AbortController();
+        const t2 = setTimeout(() => controller2.abort(), 10000);
+        try {
+          await proxyLoginOnce(controller2.signal);
+        } finally {
+          clearTimeout(t2);
+        }
+      }
 
       router.push("/today");
+      router.refresh();
       return;
-    } catch (directErr: any) {
-      setMsg(directErr?.message || proxyErr?.message || "Login failed");
+    } catch (proxyErr: any) {
+      // 2) Fallback: direct Supabase login (best for networks that block your Vercel API route)
+      try {
+        const { data, error } = await supabase.auth.signInWithPassword({ email: e, password: p });
+        if (error) throw error;
+        if (!data?.session) throw new Error("No session returned");
+
+        router.push("/today");
+        router.refresh();
+        return;
+      } catch (directErr: any) {
+        const msg =
+          (directErr?.name === "AbortError" || proxyErr?.name === "AbortError")
+            ? "Login timed out. Please try again (your network may be blocking the server route or Supabase)."
+            : directErr?.message || proxyErr?.message || "Login failed";
+        setMsg(msg);
+      }
+    } finally {
+      setLoading(false);
     }
-  } finally {
-    setLoading(false);
   }
-}
 
      
 

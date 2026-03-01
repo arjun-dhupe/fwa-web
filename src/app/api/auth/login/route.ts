@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
+// Prefer running close to India for better reliability; Vercel will pick the first available region.
+export const preferredRegion = ["sin1", "bom1"];
 
 function supa() {
   // Use ANON key for password sign-in so Supabase returns a normal Session
