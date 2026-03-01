@@ -10,7 +10,6 @@ export default function LoginPage() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-
   const [msg, setMsg] = useState<string>("");
   const [loading, setLoading] = useState(false);
 
@@ -27,7 +26,6 @@ export default function LoginPage() {
         return;
       }
 
-      // ✅ LOGIN via server proxy (avoids direct supabase.co timeouts for some networks)
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -37,20 +35,21 @@ export default function LoginPage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || "Login failed");
 
-      // ✅ Set client session (localStorage) from returned tokens.
-      // This ensures `/today` can see an authenticated user even if cookies aren't set.
       const s = data?.session;
       if (!s?.access_token || !s?.refresh_token) {
-        throw new Error("Login response missing tokens");
+        throw new Error(
+          data?.error ||
+            "Login succeeded but no session tokens were returned. If you just signed up, confirm your email and try again."
+        );
       }
 
       const { error: setErr } = await supabase.auth.setSession({
         access_token: s.access_token,
         refresh_token: s.refresh_token,
       });
+
       if (setErr) throw setErr;
 
-      // Force re-read of auth state before navigating
       await supabase.auth.getUser();
 
       router.replace("/today");
@@ -96,7 +95,6 @@ export default function LoginPage() {
         overflow: "hidden",
       }}
     >
-      {/* overlay */}
       <div
         style={{
           position: "absolute",
@@ -109,7 +107,6 @@ export default function LoginPage() {
         }}
       />
 
-      {/* ribbon */}
       <div className="marquee" style={{ position: "relative", zIndex: 5 }}>
         <div className="marquee__track">
           {row}

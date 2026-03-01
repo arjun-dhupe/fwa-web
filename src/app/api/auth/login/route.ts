@@ -4,9 +4,10 @@ import { createClient } from "@supabase/supabase-js";
 export const runtime = "nodejs";
 
 function supa() {
+  // Use ANON key for password sign-in so Supabase returns a normal Session
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     { auth: { persistSession: false } }
   );
 }
@@ -16,48 +17,35 @@ export async function POST(req: Request) {
     const { email, password } = await req.json();
 
     if (!email || !password) {
-      return NextResponse.json(
-        { error: "Email and password required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Email and password required" }, { status: 400 });
     }
 
     const supabase = supa();
 
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
 
-    if (error || !data.session) {
+    if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+
+    // If email confirmations are enabled, session can be null
+    if (!data?.session) {
       return NextResponse.json(
-        { error: error?.message || "Login failed" },
+        { error: "No session returned. If email confirmation is enabled, confirm your email and try again." },
         { status: 400 }
       );
     }
 
-    const res = NextResponse.json({ ok: true });
+    const s: any = data.session;
 
-    // ✅ Set httpOnly cookies (browser never sees tokens)
-    res.cookies.set("sb-access-token", data.session.access_token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "lax",
-      path: "/",
+    return NextResponse.json({
+      session: {
+        access_token: s.access_token,
+        refresh_token: s.refresh_token,
+        expires_at: s.expires_at,
+        token_type: s.token_type,
+      },
+      user: data.user ?? null,
     });
-
-    res.cookies.set("sb-refresh-token", data.session.refresh_token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: "lax",
-      path: "/",
-    });
-
-    return res;
   } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || "Server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err?.message ?? "Server error" }, { status: 500 });
   }
 }
