@@ -245,14 +245,27 @@ export default function ProfilePage() {
         body_type: bodyType,
         activity_level: activity,
         goal_type: goalType,
+        // Save computed targets directly on profile so Today page matches exactly
+        target_calorie_intake: computed.ready && computed.target ? round(computed.target) : null,
+        target_protein_g: computed.ready && computed.proteinG ? round(computed.proteinG) : null,
+        target_burn_calories: computed.ready && computed.activeBurn ? round(computed.activeBurn) : null,
       };
 
       let { error: profErr } = await supabase.from("profiles").upsert(profPayload, { onConflict: "user_id" });
 
       // If columns don't exist yet, retry without them
       if (profErr && typeof profErr.message === "string" && profErr.message.toLowerCase().includes("column")) {
-        const { gender: _g, age_years: _a, body_type: _b, activity_level: _al, goal_type: _gt, ...fallback } =
-          profPayload;
+        const {
+          gender: _g,
+          age_years: _a,
+          body_type: _b,
+          activity_level: _al,
+          goal_type: _gt,
+          target_calorie_intake: _tci,
+          target_protein_g: _tpg,
+          target_burn_calories: _tbc,
+          ...fallback
+        } = profPayload;
 
         const retry = await supabase.from("profiles").upsert(fallback, { onConflict: "user_id" });
         profErr = retry.error;

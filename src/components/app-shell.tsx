@@ -89,6 +89,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
               <NavItem href="/dashboard" label="Dashboard" icon="📊" />
               <NavItem href="/today" label="Today" icon="✅" />
               <NavItem href="/log" label="Log Data" icon="➕" />
+              <NavItem href="/log-workout" label="Log Workout" icon="🏋️" />
               <NavItem href="/game" label="Game" icon="🏆" />
               <NavItem href="/analytics" label="Analytics" icon="📈" />
               <NavItem href="/history" label="History" icon="🗓️" />

@@ -55,8 +55,6 @@ export default function LogPage() {
 
   const [userId, setUserId] = useState<string>("");
 
-  // Steps
-  const [steps, setSteps] = useState<number>(0);
   // Sleep
   const [sleepHours, setSleepHours] = useState<number>(0);
   // Water
@@ -92,7 +90,6 @@ export default function LogPage() {
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string>("");
 
-  const stepsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sleepTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const waterTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const foodTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -102,13 +99,7 @@ export default function LogPage() {
     if (!uid || !dateIso) return;
 
     try {
-      const [stepsRes, sleepRes, waterRes, mealsRes] = await Promise.all([
-        supabase
-          .from("daily_logs")
-          .select("steps")
-          .eq("user_id", uid)
-          .eq("log_date", dateIso)
-          .maybeSingle(),
+      const [sleepRes, waterRes, mealsRes] = await Promise.all([
         supabase
           .from("sleep_logs")
           .select("hours")
@@ -129,7 +120,6 @@ export default function LogPage() {
           .order("created_at", { ascending: false }),
       ]);
 
-      setSteps(stepsRes.data?.steps != null ? Number(stepsRes.data.steps) : 0);
       setSleepHours(sleepRes.data?.hours != null ? Number(sleepRes.data.hours) : 0);
       setWaterMl(waterRes.data?.ml != null ? Number(waterRes.data.ml) : 0);
       setMealsToday(Array.isArray(mealsRes.data) ? mealsRes.data : []);
@@ -172,19 +162,14 @@ export default function LogPage() {
   }, [logDateIso, userId]);
 
   // ================= AUTOSAVE =================
-  function scheduleAutosave(kind: "steps" | "sleep" | "water", value: number) {
-    const ref = kind === "steps" ? stepsTimer : kind === "sleep" ? sleepTimer : waterTimer;
+  function scheduleAutosave(kind: "sleep" | "water", value: number) {
+    const ref = kind === "sleep" ? sleepTimer : waterTimer;
     if (ref.current) clearTimeout(ref.current);
 
     ref.current = setTimeout(async () => {
       try {
         setLoading(true);
         setMsg("");
-        if (kind === "steps")
-          await supabase.from("daily_logs").upsert(
-            { user_id: userId, log_date: logDateIso, steps: value },
-            { onConflict: "user_id,log_date" }
-          );
         if (kind === "sleep")
           await supabase.from("sleep_logs").upsert(
             { user_id: userId, log_date: logDateIso, hours: value },
@@ -632,18 +617,6 @@ export default function LogPage() {
           />
         </Card>
 
-        <Card title="👣 Steps">
-          <input
-            type="number"
-            value={steps}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              setSteps(v);
-              scheduleAutosave("steps", v);
-            }}
-            className="w-full rounded-lg bg-black/30 px-3 py-2 text-white"
-          />
-        </Card>
 
         <Card title="🍽️ Meal">
           {/* meal type pills */}

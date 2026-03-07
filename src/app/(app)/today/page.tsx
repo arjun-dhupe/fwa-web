@@ -46,6 +46,56 @@ function ageFromDobISO(dobIso?: string | null) {
  * - Goal adjust: lose (-400), gain (+250), maintain (0)
  * - Protein target: 1.6g/kg
  */
+
+function readProfileTarget(profile: any, keys: string[]) {
+  for (const key of keys) {
+    const value = n(profile?.[key], 0);
+    if (value > 0) return value;
+  }
+  return 0;
+}
+
+function readBestSavedCalorieTarget(profile: any) {
+  // 1) First try the known explicit keys in priority order.
+  const direct = readProfileTarget(profile, [
+    "target_calories",
+    "target_calorie_intake",
+    "daily_calorie_intake",
+    "daily_target_calories",
+    "calorie_target",
+    "daily_calorie_target",
+    "recommended_calories",
+    "recommended_calorie_intake",
+    "target_kcal",
+    "calories_target",
+    "calorie_intake_target",
+  ]);
+  if (direct > 0) return direct;
+
+  // 2) Hard fallback: scan the whole profile row for any numeric field that clearly looks
+  // like a saved calorie target from the Profile page.
+  // This prevents Today from drifting 30–70 kcal lower due to recomputation logic.
+  let best = 0;
+  for (const [rawKey, rawValue] of Object.entries(profile ?? {})) {
+    const key = String(rawKey).toLowerCase();
+    const value = n(rawValue, 0);
+
+    const looksLikeCalories = key.includes("calor") || key.includes("kcal");
+    const looksLikeTarget =
+      key.includes("target") ||
+      key.includes("intake") ||
+      key.includes("recommended") ||
+      key.includes("goal");
+
+    // reasonable calorie target range
+    if (looksLikeCalories && looksLikeTarget && value >= 1000 && value <= 5000) {
+      best = Math.max(best, value);
+    }
+  }
+
+  return best;
+}
+
 function computeFromProfile(profile: any) {
   const gender = String(profile?.gender ?? "").toLowerCase();
   const heightCm = n(profile?.height_cm ?? profile?.height, 0);
@@ -82,19 +132,66 @@ function computeFromProfile(profile: any) {
 
   const tdee = bmr > 0 ? bmr * activityFactor : 0;
 
-  const goal = String(profile?.goal ?? profile?.fitness_goal ?? "maintain").toLowerCase();
-  const deficit = goal.includes("lose") || goal.includes("cut") ? 400 : 0;
-  const surplus = goal.includes("gain") || goal.includes("bulk") ? 250 : 0;
+  const goal = String(
+    profile?.goal ??
+      profile?.fitness_goal ??
+      profile?.primary_goal ??
+      profile?.goal_type ??
+      "maintain"
+  ).toLowerCase();
+  // Match Profile-page goal logic more closely so Today stays in sync.
+  const isFatLoss =
+    goal.includes("fat loss") ||
+    goal.includes("lose") ||
+    goal.includes("cut") ||
+    goal.includes("weight loss");
 
-  const targetCalories = tdee > 0 ? clamp(tdee - deficit + surplus, 1200, 4500) : 0;
-  const proteinTarget = weightKg > 0 ? round(weightKg * 1.6) : 0;
+  const isMuscleGain =
+    goal.includes("muscle gain") ||
+    goal.includes("gain") ||
+    goal.includes("bulk") ||
+    goal.includes("hypertrophy");
+
+  const isEndurance = goal.includes("endurance") || goal.includes("stamina") || goal.includes("performance");
+
+  const deficit = isFatLoss ? 400 : 0;
+  const surplus = isMuscleGain ? 250 : isEndurance ? 150 : 0;
+
+  // Fallback computed values
+  const computedTargetCalories = tdee > 0 ? clamp(tdee - deficit + surplus, 1200, 4500) : 0;
+  const computedProteinTarget = weightKg > 0 ? round(weightKg * 1.6) : 0;
 
   // Daily burn target (simple, effective default)
-  const burnTarget =
-    goal.includes("lose") || goal.includes("cut") ? 450 : goal.includes("gain") || goal.includes("bulk") ? 250 : 350;
+  const computedBurnTarget = isFatLoss ? 450 : isMuscleGain ? 250 : isEndurance ? 400 : 350;
+
+  // ✅ Single source of truth: always use the value saved on the profile page first.
+  // We support multiple possible column names so Today always matches Profile exactly.
+  const savedTargetCalories = readBestSavedCalorieTarget(profile);
+
+  const savedProteinTarget = readProfileTarget(profile, [
+    "target_protein_g",
+    "target_protein",
+    "daily_protein_target",
+    "protein_target",
+    "recommended_protein",
+    "recommended_protein_g",
+  ]);
+
+  const savedBurnTarget = readProfileTarget(profile, [
+    "target_burn_calories",
+    "target_burn",
+    "daily_burn_target",
+    "burn_target",
+    "calorie_burn_target",
+    "recommended_burn_calories",
+  ]);
+
+  const targetCalories = savedTargetCalories > 0 ? savedTargetCalories : computedTargetCalories;
+  const proteinTarget = savedProteinTarget > 0 ? savedProteinTarget : computedProteinTarget;
+  const burnTarget = savedBurnTarget > 0 ? savedBurnTarget : computedBurnTarget;
 
   return {
-    ok: targetCalories > 0 && proteinTarget > 0,
+    ok: (savedTargetCalories > 0 || targetCalories > 0) && (savedProteinTarget > 0 || proteinTarget > 0),
     targetCalories: round(targetCalories),
     proteinTarget,
     burnTarget,
@@ -140,9 +237,10 @@ export default function TodayPage() {
 
   const [userId, setUserId] = useState<string>("");
   const [profile, setProfile] = useState<any>(null);
-  const [meals, setMeals] = useState<any[]>([]);
-  const [workouts, setWorkouts] = useState<any[]>([]);
-  const [msg, setMsg] = useState("");
+const [meals, setMeals] = useState<any[]>([]);
+const [workouts, setWorkouts] = useState<any[]>([]);
+const [msg, setMsg] = useState("");
+const [loggedBurnToday, setLoggedBurnToday] = useState<number>(0);
 
   // ✅ Date selector (default: today)
   const [selectedDate, setSelectedDate] = useState<string>(() => yyyyMmDd(new Date()));
@@ -177,26 +275,44 @@ export default function TodayPage() {
 
   // Load meals + workouts for selected date
   useEffect(() => {
-    if (!userId) return;
-    (async () => {
-      setMsg("");
-      const [{ data: m, error: mErr }, { data: w, error: wErr }] = await Promise.all([
-        supabase.from("meals").select("*").eq("user_id", userId).eq("log_date", logDate).order("created_at", { ascending: false }),
-        supabase
-          .from("workout_logs")
-          .select("*")
-          .eq("user_id", userId)
-          .eq("log_date", logDate)
-          .order("created_at", { ascending: false }),
-      ]);
+  if (!userId) return;
+  (async () => {
+    setMsg("");
 
-      if (mErr) setMsg(mErr.message);
-      if (wErr) setMsg(wErr.message);
+    const [mealsRes, workoutsRes, burnRes] = await Promise.all([
+      supabase
+        .from("meals")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("log_date", logDate)
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("workout_logs")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("log_date", logDate)
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("workout_logs")
+        .select("calories_burned")
+        .eq("user_id", userId)
+        .eq("log_date", logDate),
+    ]);
 
-      setMeals(m ?? []);
-      setWorkouts(w ?? []);
-    })();
-  }, [userId, logDate]);
+    if (mealsRes.error) setMsg(mealsRes.error.message);
+    if (workoutsRes.error) setMsg(workoutsRes.error.message);
+    if (burnRes.error) setMsg(burnRes.error.message);
+
+    setMeals(mealsRes.data ?? []);
+    setWorkouts(workoutsRes.data ?? []);
+
+    const burnTotal = (burnRes.data ?? []).reduce(
+      (sum, row: any) => sum + n(row?.calories_burned, 0),
+      0
+    );
+    setLoggedBurnToday(round(burnTotal));
+  })();
+}, [userId, logDate]);
 
   const plan = useMemo(() => computeFromProfile(profile), [profile]);
 
@@ -205,15 +321,7 @@ export default function TodayPage() {
 
   const weightKgForBurn = plan.weightKg > 0 ? plan.weightKg : 65;
 
-  const workoutCalories = useMemo(() => {
-    return (workouts ?? []).reduce((sum, w) => {
-      const met = metForWorkoutType(String(w.workout_type ?? ""));
-      const minutes = n(w.duration_min ?? w.minutes ?? w.duration, 0);
-      const hours = minutes / 60;
-      const kcal = met * weightKgForBurn * hours;
-      return sum + Math.max(0, round(kcal));
-    }, 0);
-  }, [workouts, weightKgForBurn]);
+  const workoutCalories = loggedBurnToday;
 
   const netCalories = totalCalories - workoutCalories;
 
@@ -527,7 +635,7 @@ export default function TodayPage() {
         <div className="flex items-end justify-between gap-2">
           <div>
             <div className="text-xl font-semibold text-white">Workouts</div>
-            <div className="text-sm text-white/60">Estimated burn (MET-based) from your logged sessions.</div>
+            <div className="text-sm text-white/60">Burn is hard-linked to the saved Log Workout entries for this date.</div>
           </div>
           <div className="text-xs text-white/50">
             {workouts.length} session{workouts.length === 1 ? "" : "s"}
@@ -539,9 +647,8 @@ export default function TodayPage() {
             <div className="text-sm text-white/60">No workouts logged for this day.</div>
           ) : (
             workouts.map((w: any) => {
-              const met = metForWorkoutType(String(w.workout_type ?? ""));
               const min = n(w.duration_min ?? w.minutes ?? w.duration, 0);
-              const kcal = Math.max(0, round(met * weightKgForBurn * (min / 60)));
+              const kcal = round(n(w.calories_burned, 0));
               return (
                 <div key={w.id ?? `${w.workout_type}-${w.created_at}`} className="rounded-2xl border border-white/10 bg-black/25 p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -553,8 +660,8 @@ export default function TodayPage() {
                       </div>
                     </div>
                     <div className="text-right">
-                      <div className="text-xs text-white/60">MET {met}</div>
-                      <div className="text-xs text-white/45">wt {round(weightKgForBurn)}kg</div>
+                      <div className="text-xs text-white/60">Logged burn</div>
+                      <div className="text-xs text-white/45">from workout entry</div>
                     </div>
                   </div>
 
