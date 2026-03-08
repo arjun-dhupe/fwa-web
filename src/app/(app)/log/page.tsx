@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useRouter } from "next/navigation";
+import { rebuildDailyAnalysisSnapshot } from "@/lib/analysis";
 
 type MealType = "breakfast" | "lunch" | "dinner" | "snack";
 
@@ -57,8 +58,8 @@ export default function LogPage() {
 
   // Sleep
   const [sleepHours, setSleepHours] = useState<number>(0);
-  // Water
-  const [waterMl, setWaterMl] = useState<number>(0);
+  // Water (UI in liters, DB still stores ml)
+  const [waterLitres, setWaterLitres] = useState<number>(0);
 
   // Meals
   const [mealType, setMealType] = useState<MealType>("breakfast");
@@ -121,7 +122,7 @@ export default function LogPage() {
       ]);
 
       setSleepHours(sleepRes.data?.hours != null ? Number(sleepRes.data.hours) : 0);
-      setWaterMl(waterRes.data?.ml != null ? Number(waterRes.data.ml) : 0);
+      setWaterLitres(waterRes.data?.ml != null ? Number(waterRes.data.ml) / 1000 : 0);
       setMealsToday(Array.isArray(mealsRes.data) ? mealsRes.data : []);
 
       // Keep recents per meal type (not date-specific)
@@ -170,17 +171,19 @@ export default function LogPage() {
       try {
         setLoading(true);
         setMsg("");
-        if (kind === "sleep")
-          await supabase.from("sleep_logs").upsert(
-            { user_id: userId, log_date: logDateIso, hours: value },
-            { onConflict: "user_id,log_date" }
-          );
-        if (kind === "water")
-          await supabase.from("water_logs").upsert(
-            { user_id: userId, log_date: logDateIso, ml: value },
-            { onConflict: "user_id,log_date" }
-          );
-        setMsg("✅ Autosaved.");
+       if (kind === "sleep")
+  await supabase.from("sleep_logs").upsert(
+    { user_id: userId, log_date: logDateIso, hours: value },
+    { onConflict: "user_id,log_date" }
+  );
+if (kind === "water")
+  await supabase.from("water_logs").upsert(
+    { user_id: userId, log_date: logDateIso, ml: Math.round(value * 1000) },
+    { onConflict: "user_id,log_date" }
+  );
+
+await rebuildDailyAnalysisSnapshot(userId, logDateIso);
+setMsg("✅ Autosaved.");
       } catch (e: any) {
         setMsg(e?.message ?? "Autosave failed");
       } finally {
@@ -528,6 +531,7 @@ export default function LogPage() {
         .order("created_at", { ascending: false });
 
       setMealsToday(data || []);
+      await rebuildDailyAnalysisSnapshot(userId, logDateIso);
 
       // Refresh recents (so it learns)
       fetchRecentFoods(userId, mealType);
@@ -555,6 +559,7 @@ export default function LogPage() {
 
       setMealsToday((prev) => prev.filter((m) => m.id !== mealId));
       loadLogsForDate(userId, logDateIso);
+      await rebuildDailyAnalysisSnapshot(userId, logDateIso);
       setMsg("✅ Meal deleted.");
     } catch (e: any) {
       setMsg(e?.message ?? "Failed to delete meal");
@@ -602,19 +607,53 @@ export default function LogPage() {
             }}
             className="w-full rounded-lg bg-black/30 px-3 py-2 text-white"
           />
+
+          <div className="mt-2 grid grid-cols-3 gap-2">
+            {[6, 7, 8].map((hrs) => (
+              <button
+                key={hrs}
+                type="button"
+                onClick={() => {
+                  setSleepHours(hrs);
+                  scheduleAutosave("sleep", hrs);
+                }}
+                className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm font-semibold text-white/85 hover:bg-black/30"
+              >
+                {hrs}h
+              </button>
+            ))}
+          </div>
         </Card>
 
         <Card title="💧 Water">
           <input
             type="number"
-            value={waterMl}
+            step={0.1}
+            value={waterLitres}
             onChange={(e) => {
               const v = Number(e.target.value);
-              setWaterMl(v);
+              setWaterLitres(v);
               scheduleAutosave("water", v);
             }}
             className="w-full rounded-lg bg-black/30 px-3 py-2 text-white"
           />
+
+          <div className="mt-2 grid grid-cols-3 gap-2">
+            {[0.5, 1, 2].map((amt) => (
+              <button
+                key={amt}
+                type="button"
+                onClick={() => {
+                  const v = Number((waterLitres + amt).toFixed(1));
+                  setWaterLitres(v);
+                  scheduleAutosave("water", v);
+                }}
+                className="rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm font-semibold text-white/85 hover:bg-black/30"
+              >
+                +{amt}L
+              </button>
+            ))}
+          </div>
         </Card>
 
 

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useRouter } from "next/navigation";
+import { rebuildDailyAnalysisSnapshot } from "@/lib/analysis";
 
 type Mode = "steps" | "cardio" | "gym";
 
@@ -491,6 +492,7 @@ export default function LogWorkoutPage() {
     }
 
     setMsg("✅ Activity deleted");
+    await rebuildDailyAnalysisSnapshot(userId, logDate);
     await loadTodayLogs(userId, logDate);
   }
 
@@ -509,6 +511,7 @@ export default function LogWorkoutPage() {
     );
 
     if (!ok) return;
+    await rebuildDailyAnalysisSnapshot(userId, logDate);
 
     setSteps("");
     setIncline("");
@@ -531,6 +534,7 @@ export default function LogWorkoutPage() {
     );
 
     if (!ok) return;
+    await rebuildDailyAnalysisSnapshot(userId, logDate);
 
     setDuration("");
     setOpenSelect(null);
@@ -554,6 +558,7 @@ export default function LogWorkoutPage() {
     );
 
     if (!ok) return;
+    await rebuildDailyAnalysisSnapshot(userId, logDate);
 
     repsTouchedRef.current = false;
     setOpenSelect(null);
