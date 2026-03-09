@@ -86,7 +86,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
             <div className="text-xs text-white/55 mb-2">Navigation</div>
 
             <div className="grid gap-1">
-              <NavItem href="/dashboard" label="Dashboard" icon="📊" />
+              <NavItem href="/dashboard" label="Ask Arjun" icon="🎯" />
               <NavItem href="/today" label="Today" icon="✅" />
               <NavItem href="/log" label="Log Data" icon="➕" />
               <NavItem href="/log-workout" label="Log Workout" icon="🏋️" />
