@@ -678,13 +678,14 @@ async function callGroq(body: CoachPayload, nowHour: number): Promise<string> {
 
   const data = await response.json().catch(() => ({}));
 
-  // If rate limited, try fallback models in order of quality
+  // If rate limited, try fallback models in order
   if (!response.ok && data?.error?.message?.includes("Rate limit")) {
     const fallbackModels = [
-      "llama-3.1-70b-versatile",
       "mixtral-8x7b-32768",
       "llama-3.1-8b-instant",
       "gemma2-9b-it",
+      "llama3-70b-8192",
+      "llama3-8b-8192",
     ];
 
     for (const fallbackModel of fallbackModels) {
@@ -697,8 +698,6 @@ async function callGroq(body: CoachPayload, nowHour: number): Promise<string> {
               model: fallbackModel,
               temperature: 0.9,
               max_tokens: 500,
-              frequency_penalty: 0.4,
-              presence_penalty: 0.3,
               messages: [
                 { role: "system", content: system },
                 { role: "user",   content: user   },
@@ -712,8 +711,7 @@ async function callGroq(body: CoachPayload, nowHour: number): Promise<string> {
           const fbReply = fbData?.choices?.[0]?.message?.content;
           if (fbReply && typeof fbReply === "string") return fbReply.trim();
         }
-        // If this model is also rate limited, try the next one
-        if (!fb.ok && !fbData?.error?.message?.includes("Rate limit")) break;
+        // Always continue to next model — never break early
       } catch {
         // Try next model
       }
