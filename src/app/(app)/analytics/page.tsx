@@ -819,8 +819,8 @@ export default function AnalyticsPage() {
                   borderRadius: 14,
                   color: "white",
                 }}
-                formatter={(value: number | string | undefined, name: string) => [
-  value ?? 0,
+                formatter={(value, name) => [
+  value,
   name === "x" ? "Sleep" : "Score",
 ]}
                 labelFormatter={(_, payload) => payload?.[0]?.payload?.label ?? "Day"}
