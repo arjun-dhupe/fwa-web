@@ -4,31 +4,15 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useRouter } from "next/navigation";
 
-type Goals = {
-  steps_target: number;
-  water_ml_target: number;
-  sleep_hours_target: number;
-  calories_target: number;
-  workouts_per_week_target: number;
-  goal_type: string;
-};
-
 type DayRow = {
-  date: string; // YYYY-MM-DD
+  date: string;
   steps: number;
   waterMl: number;
   sleepHours: number;
   workoutMin: number;
   calories: number;
   protein: number;
-
-  onSteps: boolean;
-  onWater: boolean;
-  onSleep: boolean;
-  onWorkout: boolean;
-
-  score: number; // 0..4
-  label: "Great" | "Okay" | "Behind";
+  isIncomplete: boolean;
 };
 
 function yyyyMmDd(d: Date) {
@@ -52,63 +36,35 @@ function dateListInclusive(start: string, end: string) {
   return out;
 }
 
-function weekStartMondayISO(isoDate: string) {
-  const d = new Date(isoDate + "T00:00:00");
-  const day = (d.getDay() + 6) % 7;
-  d.setDate(d.getDate() - day);
-  return yyyyMmDd(d);
-}
-
-function dayIndexInWeek(isoDate: string) {
-  const d = new Date(isoDate + "T00:00:00");
-  const day = (d.getDay() + 6) % 7;
-  return day + 1;
-}
-
-function statusTone(label: DayRow["label"]) {
-  if (label === "Great") return "pill pill-good";
-  if (label === "Okay") return "pill pill-warn";
-  return "pill pill-bad";
-}
+const FIELDS: { key: keyof Omit<DayRow, "date" | "isIncomplete">; label: string; unit: string }[] = [
+  { key: "steps",      label: "Steps",    unit: "steps" },
+  { key: "waterMl",   label: "Water",    unit: "ml"    },
+  { key: "sleepHours",label: "Sleep",    unit: "hrs"   },
+  { key: "workoutMin",label: "Workout",  unit: "min"   },
+  { key: "calories",  label: "Calories", unit: "kcal"  },
+  { key: "protein",   label: "Protein",  unit: "g"     },
+];
 
 export default function HistoryPage() {
   const router = useRouter();
 
-  const today = useMemo(() => yyyyMmDd(new Date()), []);
+  const today        = useMemo(() => yyyyMmDd(new Date()), []);
   const defaultStart = useMemo(() => yyyyMmDd(addDays(new Date(), -29)), []);
 
-  const [userId, setUserId] = useState<string>("");
-  const [email, setEmail] = useState<string>("");
-
+  const [userId, setUserId]     = useState<string>("");
+  const [email, setEmail]       = useState<string>("");
   const [startDate, setStartDate] = useState<string>(defaultStart);
-  const [endDate, setEndDate] = useState<string>(today);
+  const [endDate, setEndDate]   = useState<string>(today);
+  const [rows, setRows]         = useState<DayRow[]>([]);
+  const [loading, setLoading]   = useState<boolean>(true);
+  const [msg, setMsg]           = useState<string>("");
+  const [onlyIncomplete, setOnlyIncomplete] = useState<boolean>(false);
 
-  const [goals, setGoals] = useState<Goals | null>(null);
-  const [rows, setRows] = useState<DayRow[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [msg, setMsg] = useState<string>("");
-
-  const summary = useMemo(() => {
-    if (rows.length === 0) return { onTrackPct: 0, greatDays: 0, okayDays: 0, behindDays: 0 };
-
-    const totalPossible = rows.length * 4;
-    const totalScore = rows.reduce((s, r) => s + r.score, 0);
-    const onTrackPct = Math.round((totalScore / Math.max(1, totalPossible)) * 100);
-
-    const greatDays = rows.filter((r) => r.label === "Great").length;
-    const okayDays = rows.filter((r) => r.label === "Okay").length;
-    const behindDays = rows.filter((r) => r.label === "Behind").length;
-
-    return { onTrackPct, greatDays, okayDays, behindDays };
-  }, [rows]);
-
+  // Auth
   useEffect(() => {
     (async () => {
       const { data } = await supabase.auth.getUser();
-      if (!data.user) {
-        router.push("/login");
-        return;
-      }
+      if (!data.user) { router.push("/login"); return; }
       setUserId(data.user.id);
       setEmail(data.user.email ?? "");
     })();
@@ -117,120 +73,56 @@ export default function HistoryPage() {
   async function loadRange() {
     setMsg("");
     if (!userId) return;
-
     setLoading(true);
+
     try {
-      const { data: g, error: gErr } = await supabase.from("goals").select("*").eq("user_id", userId).maybeSingle();
-      if (gErr) throw new Error(gErr.message);
-
-      const gSafe: Goals = {
-        steps_target: g?.steps_target ?? 8000,
-        water_ml_target: g?.water_ml_target ?? 2000,
-        sleep_hours_target: Number(g?.sleep_hours_target ?? 8),
-        calories_target: g?.calories_target ?? 2000,
-        workouts_per_week_target: g?.workouts_per_week_target ?? 3,
-        goal_type: g?.goal_type ?? "general_fitness",
-      };
-      setGoals(gSafe);
-
       const [stepsRes, sleepRes, waterRes, mealsRes, workoutsRes] = await Promise.all([
-        supabase
-          .from("daily_logs")
-          .select("log_date, steps")
-          .eq("user_id", userId)
-          .gte("log_date", startDate)
-          .lte("log_date", endDate),
-
-        supabase
-          .from("sleep_logs")
-          .select("log_date, hours")
-          .eq("user_id", userId)
-          .gte("log_date", startDate)
-          .lte("log_date", endDate),
-
-        supabase
-          .from("water_logs")
-          .select("log_date, ml")
-          .eq("user_id", userId)
-          .gte("log_date", startDate)
-          .lte("log_date", endDate),
-
-        supabase
-          .from("meals")
-          .select("log_date, calories, protein_g")
-          .eq("user_id", userId)
-          .gte("log_date", startDate)
-          .lte("log_date", endDate),
-
-        supabase
-          .from("workout_logs")
-          .select("log_date, duration_min")
-          .eq("user_id", userId)
-          .gte("log_date", startDate)
-          .lte("log_date", endDate),
+        supabase.from("daily_logs").select("log_date, steps")
+          .eq("user_id", userId).gte("log_date", startDate).lte("log_date", endDate),
+        supabase.from("sleep_logs").select("log_date, hours")
+          .eq("user_id", userId).gte("log_date", startDate).lte("log_date", endDate),
+        supabase.from("water_logs").select("log_date, ml")
+          .eq("user_id", userId).gte("log_date", startDate).lte("log_date", endDate),
+        supabase.from("meals").select("log_date, calories, protein_g")
+          .eq("user_id", userId).gte("log_date", startDate).lte("log_date", endDate),
+        supabase.from("workout_logs").select("log_date, duration_min")
+          .eq("user_id", userId).gte("log_date", startDate).lte("log_date", endDate),
       ]);
 
-      if (stepsRes.error) throw new Error(stepsRes.error.message);
-      if (sleepRes.error) throw new Error(sleepRes.error.message);
-      if (waterRes.error) throw new Error(waterRes.error.message);
-      if (mealsRes.error) throw new Error(mealsRes.error.message);
-      if (workoutsRes.error) throw new Error(workoutsRes.error.message);
+      for (const r of [stepsRes, sleepRes, waterRes, mealsRes, workoutsRes]) {
+        if (r.error) throw new Error(r.error.message);
+      }
 
-      const stepsByDate = new Map<string, number>();
-      for (const r of stepsRes.data ?? []) stepsByDate.set(r.log_date, r.steps ?? 0);
-
-      const sleepByDate = new Map<string, number>();
-      for (const r of sleepRes.data ?? []) sleepByDate.set(r.log_date, Number(r.hours ?? 0));
-
-      const waterByDate = new Map<string, number>();
-      for (const r of waterRes.data ?? []) waterByDate.set(r.log_date, Number(r.ml ?? 0));
-
+      const stepsByDate    = new Map<string, number>();
+      const sleepByDate    = new Map<string, number>();
+      const waterByDate    = new Map<string, number>();
+      const workoutByDate  = new Map<string, number>();
       const mealsAggByDate = new Map<string, { calories: number; protein: number }>();
+
+      for (const r of stepsRes.data   ?? []) stepsByDate.set(r.log_date, r.steps ?? 0);
+      for (const r of sleepRes.data   ?? []) sleepByDate.set(r.log_date, Number(r.hours ?? 0));
+      for (const r of waterRes.data   ?? []) waterByDate.set(r.log_date, Number(r.ml ?? 0));
+      for (const r of workoutsRes.data ?? []) {
+        workoutByDate.set(r.log_date, (workoutByDate.get(r.log_date) ?? 0) + (r.duration_min ?? 0));
+      }
       for (const r of mealsRes.data ?? []) {
         const prev = mealsAggByDate.get(r.log_date) ?? { calories: 0, protein: 0 };
         mealsAggByDate.set(r.log_date, {
           calories: prev.calories + (r.calories ?? 0),
-          protein: prev.protein + (r.protein_g ?? 0),
+          protein:  prev.protein  + (r.protein_g ?? 0),
         });
       }
 
-      const workoutMinByDate = new Map<string, number>();
-      for (const r of workoutsRes.data ?? []) {
-        const prev = workoutMinByDate.get(r.log_date) ?? 0;
-        workoutMinByDate.set(r.log_date, prev + (r.duration_min ?? 0));
-      }
-
       const dates = dateListInclusive(startDate, endDate);
-
-      const weekWorkoutDaysSoFar = new Map<string, number>();
-
       const built: DayRow[] = dates.map((date) => {
-        const steps = stepsByDate.get(date) ?? 0;
-        const sleepHours = sleepByDate.get(date) ?? 0;
-        const waterMl = waterByDate.get(date) ?? 0;
-        const workoutMin = workoutMinByDate.get(date) ?? 0;
+        const steps       = stepsByDate.get(date)  ?? 0;
+        const sleepHours  = sleepByDate.get(date)  ?? 0;
+        const waterMl     = waterByDate.get(date)  ?? 0;
+        const workoutMin  = workoutByDate.get(date) ?? 0;
+        const mealAgg     = mealsAggByDate.get(date) ?? { calories: 0, protein: 0 };
 
-        const mealAgg = mealsAggByDate.get(date) ?? { calories: 0, protein: 0 };
-        const calories = mealAgg.calories;
-        const protein = mealAgg.protein;
-
-        const onSteps = steps >= gSafe.steps_target;
-        const onWater = waterMl >= gSafe.water_ml_target;
-        const onSleep = sleepHours >= gSafe.sleep_hours_target;
-
-        const wk = weekStartMondayISO(date);
-        const didWorkoutToday = workoutMin > 0 ? 1 : 0;
-
-        const prevSoFar = weekWorkoutDaysSoFar.get(wk) ?? 0;
-        const soFar = prevSoFar + didWorkoutToday;
-        weekWorkoutDaysSoFar.set(wk, soFar);
-
-        const idx = dayIndexInWeek(date);
-        const expectedByToday = Math.ceil((gSafe.workouts_per_week_target * idx) / 7);
-        const onWorkout = soFar >= expectedByToday;
-
-        const score = [onSteps, onWater, onSleep, onWorkout].filter(Boolean).length;
-        const label: DayRow["label"] = score >= 3 ? "Great" : score === 2 ? "Okay" : "Behind";
+        // A day is "incomplete" if ANY tracked field has no data logged
+        const isIncomplete = steps === 0 || waterMl === 0 || sleepHours === 0 || mealAgg.calories === 0;
 
         return {
           date,
@@ -238,14 +130,9 @@ export default function HistoryPage() {
           waterMl,
           sleepHours,
           workoutMin,
-          calories,
-          protein,
-          onSteps,
-          onWater,
-          onSleep,
-          onWorkout,
-          score,
-          label,
+          calories: mealAgg.calories,
+          protein:  mealAgg.protein,
+          isIncomplete,
         };
       });
 
@@ -264,15 +151,17 @@ export default function HistoryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
-  const startOk = startDate <= endDate;
-  const pctTone = summary.onTrackPct >= 70 ? "pill pill-good" : summary.onTrackPct >= 45 ? "pill pill-warn" : "pill pill-bad";
+  const startOk       = startDate <= endDate;
+  const visibleRows   = onlyIncomplete ? rows.filter((r) => r.isIncomplete) : rows;
+  const incompleteCnt = rows.filter((r) => r.isIncomplete).length;
 
   return (
     <div className="space-y-4">
+      {/* Header */}
       <div>
-        <div className="hype">Mission Log</div>
+        <div className="hype">Activity Log</div>
         <h1 className="text-2xl font-semibold">History</h1>
-        <p className="text-sm text-white/60">{email} • Your day-by-day scoreboard</p>
+        <p className="text-sm text-white/60">{email} • Day-by-day logged data</p>
       </div>
 
       {/* Controls */}
@@ -304,14 +193,11 @@ export default function HistoryPage() {
               disabled={!startOk || loading}
               className="btn-win rounded-lg px-3 py-2 text-sm disabled:opacity-50"
             >
-              {loading ? "Loading..." : "Apply range"}
+              {loading ? "Loading…" : "Apply range"}
             </button>
 
             <button
-              onClick={() => {
-                setStartDate(defaultStart);
-                setEndDate(today);
-              }}
+              onClick={() => { setStartDate(defaultStart); setEndDate(today); }}
               className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm hover:bg-white/10"
             >
               Last 30 days
@@ -321,88 +207,97 @@ export default function HistoryPage() {
           </div>
         </div>
 
-        {/* Summary */}
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <span className={`${pctTone} rounded-full px-3 py-1 text-sm`}>
-            <span className="text-white/70">On-track: </span>
-            <b className="text-white/90">{summary.onTrackPct}%</b>
-          </span>
+        {/* Incomplete filter pill */}
+        <div className="mt-4 flex items-center gap-3">
+          <button
+            onClick={() => setOnlyIncomplete((v) => !v)}
+            className={`flex items-center gap-2 rounded-full border px-4 py-1.5 text-sm font-medium transition-all ${
+              onlyIncomplete
+                ? "border-amber-400/60 bg-amber-400/15 text-amber-300"
+                : "border-white/10 bg-black/30 text-white/60 hover:bg-white/10"
+            }`}
+          >
+            <span
+              className={`inline-block h-2 w-2 rounded-full ${
+                onlyIncomplete ? "bg-amber-400" : "bg-white/30"
+              }`}
+            />
+            Show incomplete days
+            {incompleteCnt > 0 && (
+              <span
+                className={`ml-1 rounded-full px-1.5 py-0.5 text-xs ${
+                  onlyIncomplete ? "bg-amber-400/30 text-amber-200" : "bg-white/10 text-white/50"
+                }`}
+              >
+                {incompleteCnt}
+              </span>
+            )}
+          </button>
 
-          <span className="pill rounded-full px-3 py-1 text-sm">
-            <span className="text-white/70">Great: </span>
-            <b className="text-white/90">{summary.greatDays}</b>
-          </span>
-
-          <span className="pill rounded-full px-3 py-1 text-sm">
-            <span className="text-white/70">Okay: </span>
-            <b className="text-white/90">{summary.okayDays}</b>
-          </span>
-
-          <span className="pill rounded-full px-3 py-1 text-sm">
-            <span className="text-white/70">Behind: </span>
-            <b className="text-white/90">{summary.behindDays}</b>
-          </span>
+          {onlyIncomplete && (
+            <span className="text-xs text-white/40">
+              Days missing steps, water, sleep, or calories
+            </span>
+          )}
         </div>
-
-        {goals && (
-          <div className="mt-2 text-xs text-white/55">
-            Targets: {goals.steps_target} steps • {goals.water_ml_target} ml water • {goals.sleep_hours_target} hrs sleep
-            • {goals.workouts_per_week_target} workouts/week (pace)
-          </div>
-        )}
       </div>
 
       {/* Table */}
       <div className="glass glow-ring overflow-hidden rounded-2xl">
         <div className="overflow-x-auto">
-          <table className="min-w-[980px] w-full text-sm">
-            <thead className="bg-black/40 text-white/75">
+          <table className="min-w-[860px] w-full text-sm">
+            <thead className="bg-black/40 text-white/60 text-xs uppercase tracking-wider">
               <tr>
-                <th className="px-3 py-2 text-left">Date</th>
-                <th className="px-3 py-2 text-left">Status</th>
-                <th className="px-3 py-2 text-right">Score</th>
-                <th className="px-3 py-2 text-right">Steps</th>
-                <th className="px-3 py-2 text-right">Water</th>
-                <th className="px-3 py-2 text-right">Sleep</th>
-                <th className="px-3 py-2 text-right">Workout</th>
-                <th className="px-3 py-2 text-right">Calories</th>
-                <th className="px-3 py-2 text-right">Protein</th>
+                <th className="px-4 py-3 text-left font-medium">Date</th>
+                {FIELDS.map((f) => (
+                  <th key={f.key} className="px-4 py-3 text-right font-medium">
+                    {f.label}
+                    <span className="ml-1 text-white/30 normal-case tracking-normal font-normal">
+                      ({f.unit})
+                    </span>
+                  </th>
+                ))}
               </tr>
             </thead>
 
-            <tbody className="bg-black/20">
-              {rows.length === 0 && !loading ? (
+            <tbody className="divide-y divide-white/[0.06]">
+              {visibleRows.length === 0 && !loading ? (
                 <tr>
-                  <td className="px-3 py-4 text-white/55" colSpan={9}>
-                    No data in this range yet.
+                  <td className="px-4 py-6 text-white/40 text-center" colSpan={7}>
+                    {onlyIncomplete ? "No incomplete days found in this range." : "No data in this range yet."}
                   </td>
                 </tr>
               ) : (
-                rows.map((r) => (
-                  <tr key={r.date} className="border-t border-white/10 hover:bg-white/5 transition-colors">
-                    <td className="px-3 py-2 text-white/85">{r.date}</td>
-
-                    <td className="px-3 py-2">
-                      <span className={`${statusTone(r.label)} rounded-full px-3 py-1 text-xs`}>
-                        <b className="text-white/90">{r.label}</b>
-                      </span>
-
-                      <div className="mt-1 text-xs text-white/55">
-                        <span className={r.onSteps ? "text-emerald-300" : "text-white/40"}>Steps</span> •{" "}
-                        <span className={r.onWater ? "text-emerald-300" : "text-white/40"}>Water</span> •{" "}
-                        <span className={r.onSleep ? "text-emerald-300" : "text-white/40"}>Sleep</span> •{" "}
-                        <span className={r.onWorkout ? "text-emerald-300" : "text-white/40"}>Workout pace</span>
-                      </div>
+                visibleRows.map((r) => (
+                  <tr
+                    key={r.date}
+                    className={`transition-colors hover:bg-white/[0.04] ${
+                      r.isIncomplete ? "bg-amber-500/[0.04]" : ""
+                    }`}
+                  >
+                    <td className="px-4 py-3 text-white/85 font-medium">
+                      {r.date}
+                      {r.isIncomplete && (
+                        <span className="ml-2 rounded-full bg-amber-400/15 px-2 py-0.5 text-[10px] text-amber-300 font-normal">
+                          incomplete
+                        </span>
+                      )}
                     </td>
 
-                    <td className="px-3 py-2 text-right text-white/85">{r.score}/4</td>
-
-                    <td className="px-3 py-2 text-right text-white/70">{r.steps}</td>
-                    <td className="px-3 py-2 text-right text-white/70">{r.waterMl}</td>
-                    <td className="px-3 py-2 text-right text-white/70">{r.sleepHours}</td>
-                    <td className="px-3 py-2 text-right text-white/70">{r.workoutMin}</td>
-                    <td className="px-3 py-2 text-right text-white/70">{r.calories}</td>
-                    <td className="px-3 py-2 text-right text-white/70">{r.protein}</td>
+                    {FIELDS.map((f) => {
+                      const val = r[f.key] as number;
+                      const empty = val === 0;
+                      return (
+                        <td
+                          key={f.key}
+                          className={`px-4 py-3 text-right tabular-nums ${
+                            empty ? "text-white/20" : "text-white/75"
+                          }`}
+                        >
+                          {empty ? "—" : val}
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))
               )}
@@ -412,11 +307,6 @@ export default function HistoryPage() {
       </div>
 
       {msg && <p className="text-sm text-red-300">{msg}</p>}
-
-      <p className="text-xs text-white/55">
-        Weekly workout pacing: the app checks if workouts completed so far this week are at least the expected count by
-        that day.
-      </p>
     </div>
   );
 }
