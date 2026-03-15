@@ -231,10 +231,12 @@ function ProfileSetupBanner({ missing, onDismiss }: { missing: string[]; onDismi
 
 /* ─── Sidebar quote card ─────────────────────────────── */
 function SidebarQuoteCard() {
-  const [idx,  setIdx]  = useState(() => Math.floor(Math.random() * SIDEBAR_QUOTES.length));
+  const [idx, setIdx] = useState(0);
   const [fade, setFade] = useState(true);
 
   useEffect(() => {
+    setIdx(Math.floor(Math.random() * SIDEBAR_QUOTES.length));
+
     const t = setInterval(() => {
       setFade(false);
       setTimeout(() => {
@@ -242,6 +244,7 @@ function SidebarQuoteCard() {
         setFade(true);
       }, 350);
     }, 5000);
+
     return () => clearInterval(t);
   }, []);
 
@@ -257,8 +260,13 @@ function SidebarQuoteCard() {
       }}
     >
       <div className="flex items-center gap-2 mb-2">
-        <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: "var(--accent-a, #a3e635)" }} />
-        <span className="text-[9px] font-bold uppercase tracking-widest text-white/30">Arjun Says</span>
+        <span
+          className="inline-block h-1.5 w-1.5 rounded-full"
+          style={{ background: "var(--accent-a, #a3e635)" }}
+        />
+        <span className="text-[9px] font-bold uppercase tracking-widest text-white/30">
+          Arjun Says
+        </span>
       </div>
       <p className="text-[11px] font-semibold text-white/70 leading-relaxed">{q.line}</p>
       <p className="text-[10px] text-white/30 italic mt-0.5 leading-relaxed">{q.sub}</p>

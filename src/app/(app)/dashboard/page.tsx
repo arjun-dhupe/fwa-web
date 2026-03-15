@@ -49,10 +49,21 @@ type ChatMessage = {
   id: string;
   role: "coach" | "user";
   text: string;
+  suggestions?: string[];
 };
 
 /* ─── MiniBar ────────────────────────────────────────── */
-function MiniBar({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
+function MiniBar({
+  label,
+  value,
+  max,
+  color,
+}: {
+  label: string;
+  value: number;
+  max: number;
+  color: string;
+}) {
   const pct = max > 0 ? clamp((value / max) * 100, 4, 100) : 4;
   return (
     <div className="space-y-1.5">
@@ -61,7 +72,10 @@ function MiniBar({ label, value, max, color }: { label: string; value: number; m
         <span className="font-mono text-white/60">{round(value)}</span>
       </div>
       <div className="h-1 overflow-hidden rounded-full bg-white/8">
-        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${pct}%`, background: color }} />
+        <div
+          className="h-full rounded-full transition-all duration-700"
+          style={{ width: `${pct}%`, backgroundColor: color }}
+        />
       </div>
     </div>
   );
@@ -102,6 +116,7 @@ export default function DashboardPage() {
   const [msg, setMsg] = useState("");
   const [todaySnapshot, setTodaySnapshot] = useState<Snapshot | null>(null);
   const [last7, setLast7] = useState<Snapshot[]>([]);
+  const [userProfile, setUserProfile] = useState<any>(null);
   const [selectedPrompt, setSelectedPrompt] = useState<PromptKey | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
@@ -143,9 +158,10 @@ export default function DashboardPage() {
           days.push(yyyyMmDd(d));
         }
 
-        const [{ data: todayRow, error: todayErr }, { data: weekRows, error: weekErr }] = await Promise.all([
+        const [{ data: todayRow, error: todayErr }, { data: weekRows, error: weekErr }, { data: profileRow }] = await Promise.all([
           supabase.from("daily_analysis_snapshots").select("*").eq("user_id", data.user.id).eq("log_date", todayIso).maybeSingle(),
           supabase.from("daily_analysis_snapshots").select("*").eq("user_id", data.user.id).in("log_date", days).order("log_date", { ascending: true }),
+          supabase.from("profiles").select("name, goal_type, weight_kg, age_years, activity_level, height_cm, body_type").eq("user_id", data.user.id).maybeSingle(),
         ]);
 
         if (todayErr) throw new Error(todayErr.message);
@@ -153,6 +169,10 @@ export default function DashboardPage() {
 
         setTodaySnapshot((todayRow as Snapshot | null) ?? null);
         setLast7((weekRows as Snapshot[]) ?? []);
+
+        // Only use the name the user explicitly set in Profile — never the email
+        const rawProfile = (profileRow as any) ?? {};
+        setUserProfile({ ...rawProfile, name: rawProfile.name || null });
       } catch (e: any) {
         setMsg(e?.message ?? "Something went wrong");
       } finally {
@@ -220,12 +240,25 @@ export default function DashboardPage() {
     return `${coachSummary} Do the next useful thing, not the perfect thing.`;
   }
 
-  async function fetchCoachReply(question: string): Promise<string> {
+  async function fetchCoachReply(question: string): Promise<{ reply: string; suggestions: string[] }> {
     const recentMessages = chatMessages.slice(-8).map((m) => ({ role: m.role, text: m.text }));
     const payload = {
       question,
       context: {
-        today: { date: todayIso, calories: intake, targetCals, protein, targetProt, burn, targetBurn, water, sleep, consistency, priorities, coachSummary },
+        today: {
+          date:          todayIso,
+          calories:      intake,
+          targetCalories: targetCals,
+          protein,
+          targetProtein:  targetProt,
+          burn,
+          targetBurn,
+          water,
+          sleep,
+          consistency,
+          priorities,
+          coachSummary,
+        },
         last7: {
           averageConsistency: last7.length > 0 ? round(last7.reduce((s, x) => s + n(x.consistency_score, 0), 0) / last7.length) : 0,
           averageCalories:    last7.length > 0 ? round(last7.reduce((s, x) => s + n(x.calorie_intake, 0), 0) / last7.length) : 0,
@@ -233,24 +266,46 @@ export default function DashboardPage() {
           averageSleep:       last7.length > 0 ? round(last7.reduce((s, x) => s + n(x.sleep_hours, 0), 0) / last7.length) : 0,
           averageWater:       last7.length > 0 ? round(last7.reduce((s, x) => s + n(x.water_l, 0), 0) / last7.length) : 0,
         },
+        // ← profile sent silently on every message
+        profile: userProfile ? {
+          name:          userProfile.name          ?? null,
+          goal:          userProfile.goal_type     ?? null,
+          weightKg:      userProfile.weight_kg     ?? null,
+          ageYears:      userProfile.age_years     ?? null,
+          activityLevel: userProfile.activity_level ?? null,
+          heightCm:      userProfile.height_cm     ?? null,
+          bodyType:      userProfile.body_type     ?? null,
+        } : null,
         recentMessages,
       },
     };
     const res = await fetch("/api/coach/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data?.error || "Coach unavailable right now.");
-    return String(data?.reply || "I'm here — give me a little more detail.");
+    return {
+      reply:       String(data?.reply || "I'm here — give me a little more detail."),
+      suggestions: Array.isArray(data?.suggestions) ? data.suggestions : [],
+    };
   }
 
   async function sendChatMessage(rawText: string) {
     const text = rawText.trim();
     if (!text || chatLoading) return;
-    setChatMessages((prev) => [...prev, { id: `${Date.now()}-user`, role: "user", text }]);
+    // Clear suggestions from all previous coach messages when user sends a new one
+    setChatMessages((prev) => [
+      ...prev.map(m => m.role === "coach" ? { ...m, suggestions: [] } : m),
+      { id: `${Date.now()}-user`, role: "user", text },
+    ]);
     setChatInput("");
     setChatLoading(true);
     try {
-      const reply = await fetchCoachReply(text);
-      setChatMessages((prev) => [...prev, { id: `${Date.now()}-coach`, role: "coach", text: reply }]);
+      const { reply, suggestions } = await fetchCoachReply(text);
+      setChatMessages((prev) => [...prev, {
+        id: `${Date.now()}-coach`,
+        role: "coach",
+        text: reply,
+        suggestions,
+      }]);
     } catch (e: any) {
       const fallback = buildFallbackReply(text);
       setMsg(e?.message ?? "Coach unavailable right now.");
@@ -374,6 +429,9 @@ export default function DashboardPage() {
         .typing-dot { animation: blink 1.3s ease-in-out infinite; }
         .typing-dot:nth-child(2) { animation-delay: 0.18s; }
         .typing-dot:nth-child(3) { animation-delay: 0.36s; }
+
+        .suggestion-chip { transition: all 0.15s ease; }
+        .suggestion-chip:hover { transform: translateY(-1px); }
       `}</style>
 
       <div className="space-y-6">
@@ -463,19 +521,72 @@ export default function DashboardPage() {
             className="chat-scroll h-[380px] space-y-3 px-6 py-5"
           >
             {chatMessages.map((message) => (
-              <div
-                key={message.id}
-                className={cx(
-                  "max-w-[82%] rounded-2xl px-4 py-3 text-sm leading-relaxed",
-                  message.role === "coach"
-                    ? "coach-bubble text-white/80"
-                    : "user-bubble ml-auto text-white/90"
+              <div key={message.id}>
+                <div
+                  className={cx(
+                    "max-w-[82%] rounded-2xl px-4 py-3 text-sm leading-relaxed",
+                    message.role === "coach"
+                      ? "coach-bubble text-white/80"
+                      : "user-bubble ml-auto text-white/90"
+                  )}
+                >
+                  {message.role === "coach" && (
+                    <span className="arjun-brand mr-2 text-xs text-lime-400">Arjun</span>
+                  )}
+                  {message.role === "coach" ? (
+                    <span>
+                      {message.text.split("\n").map((line, i) => {
+                        const trimmed = line.trim();
+                        // Day header: "Day 1 — ..." or "Day 1:"
+                        if (/^day\s*\d+/i.test(trimmed)) {
+                          return (
+                            <span key={i}>
+                              {i > 0 && <br />}
+                              <span className="block mt-2 font-bold text-white/95">{trimmed}</span>
+                            </span>
+                          );
+                        }
+                        // Bullet point
+                        if (trimmed.startsWith("•") || trimmed.startsWith("-")) {
+                          return (
+                            <span key={i} className="block pl-3 text-white/75">
+                              {trimmed}
+                            </span>
+                          );
+                        }
+                        // Empty line = spacing
+                        if (trimmed === "") {
+                          return <span key={i} className="block mt-1" />;
+                        }
+                        // Normal line
+                        return (
+                          <span key={i}>
+                            {i > 0 && trimmed !== "" && <br />}
+                            {trimmed}
+                          </span>
+                        );
+                      })}
+                    </span>
+                  ) : (
+                    message.text
+                  )}
+                </div>
+
+                {/* Follow-up suggestion chips — only on latest coach message */}
+                {message.role === "coach" && message.suggestions && message.suggestions.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5 max-w-[90%]">
+                    {message.suggestions.map((s, i) => (
+                      <button
+                        key={i}
+                        onClick={() => sendChatMessage(s)}
+                        disabled={chatLoading}
+                        className="suggestion-chip rounded-full border border-lime-400/20 bg-lime-400/5 px-3 py-1.5 text-[11px] font-medium text-lime-400/70 transition hover:border-lime-400/40 hover:bg-lime-400/10 hover:text-lime-400 disabled:opacity-30"
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
                 )}
-              >
-                {message.role === "coach" && (
-                  <span className="arjun-brand mr-2 text-xs text-lime-400">Arjun</span>
-                )}
-                {message.text}
               </div>
             ))}
 
