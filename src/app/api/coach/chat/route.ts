@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const preferredRegion = ["sin1", "bom1", "iad1", "dub1", "cle1"];
-export const maxDuration = 30;
+export const maxDuration = 10; // Vercel Hobby = 10s max. Pro = 30s.
 
 /* ─────────────────────────────────────────────────────────────
    TYPES
@@ -673,10 +673,53 @@ async function callGroq(body: CoachPayload, nowHour: number): Promise<string> {
         ],
       }),
     }),
-    14000
+    12000  // 8s for Hobby plan (leaves 2s buffer before Vercel's 10s limit)
   );
 
   const data = await response.json().catch(() => ({}));
+
+  // If rate limited, try fallback models in order of quality
+  if (!response.ok && data?.error?.message?.includes("Rate limit")) {
+    const fallbackModels = [
+      "llama-3.1-70b-versatile",
+      "mixtral-8x7b-32768",
+      "llama-3.1-8b-instant",
+      "gemma2-9b-it",
+    ];
+
+    for (const fallbackModel of fallbackModels) {
+      try {
+        const fb = await withTimeout(
+          fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey },
+            body: JSON.stringify({
+              model: fallbackModel,
+              temperature: 0.9,
+              max_tokens: 500,
+              frequency_penalty: 0.4,
+              presence_penalty: 0.3,
+              messages: [
+                { role: "system", content: system },
+                { role: "user",   content: user   },
+              ],
+            }),
+          }),
+          10000
+        );
+        const fbData = await fb.json().catch(() => ({}));
+        if (fb.ok) {
+          const fbReply = fbData?.choices?.[0]?.message?.content;
+          if (fbReply && typeof fbReply === "string") return fbReply.trim();
+        }
+        // If this model is also rate limited, try the next one
+        if (!fb.ok && !fbData?.error?.message?.includes("Rate limit")) break;
+      } catch {
+        // Try next model
+      }
+    }
+  }
+
   if (!response.ok) throw new Error((data?.error?.message as string) || "Groq " + response.status);
   const reply = data?.choices?.[0]?.message?.content;
   if (!reply || typeof reply !== "string") throw new Error("Empty reply from Groq.");
