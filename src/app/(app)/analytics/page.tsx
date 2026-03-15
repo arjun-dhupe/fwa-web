@@ -819,7 +819,10 @@ export default function AnalyticsPage() {
                   borderRadius: 14,
                   color: "white",
                 }}
-                formatter={(value: number, name: string) => [value, name === "x" ? "Sleep" : "Score"]}
+                formatter={(value: number | string | undefined, name: string) => [
+  value ?? 0,
+  name === "x" ? "Sleep" : "Score",
+]}
                 labelFormatter={(_, payload) => payload?.[0]?.payload?.label ?? "Day"}
               />
               <Scatter data={recoveryScatter} fill="#a78bfa" />
