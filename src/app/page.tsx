@@ -63,7 +63,7 @@ export default function LoginPage() {
             FWA
           </div>
           <div className="mt-2 text-sm text-gray-400">
-            Fitness Wins App
+            Fitness With Arjun
           </div>
         </div>
 
